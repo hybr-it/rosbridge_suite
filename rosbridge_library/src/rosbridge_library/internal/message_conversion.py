@@ -83,6 +83,8 @@ ros_binary_types_list_braces = [("uint8[]", re.compile(r'uint8\[[^\]]*\]')),
 
 binary_encoder = None
 
+ros_type_field_name = "@rostype"
+
 def get_encoder():
     global binary_encoder
     if binary_encoder is None:
@@ -116,11 +118,11 @@ class FieldTypeMismatchException(Exception):
             Exception.__init__(self, "%s message requires a %s for field %s, but got a %s" % (roottype, expected_type, '.'.join(fields), found_type))
 
 
-def extract_values(inst):
+def extract_values(inst, options=None):
     rostype = getattr(inst, "_type", None)
     if rostype is None:
         raise InvalidMessageException(inst=inst)
-    return _from_inst(inst, rostype)
+    return _from_inst(inst, rostype, options=options)
 
 
 def populate_instance(msg, inst):
@@ -129,7 +131,7 @@ def populate_instance(msg, inst):
     return _to_inst(msg, inst._type, inst._type, inst)
 
 
-def _from_inst(inst, rostype):
+def _from_inst(inst, rostype, options=None):
     # Special case for uint8[], we encode the string
     for binary_type, expression in ros_binary_types_list_braces:
         if expression.sub(binary_type, rostype) in ros_binary_types:
@@ -150,13 +152,13 @@ def _from_inst(inst, rostype):
 
     # Check if it's a list or tuple
     if type(inst) in list_types:
-        return _from_list_inst(inst, rostype)
+        return _from_list_inst(inst, rostype, options=options)
 
     # Assume it's otherwise a full ros msg object
-    return _from_object_inst(inst, rostype)
+    return _from_object_inst(inst, rostype, options=options)
 
 
-def _from_list_inst(inst, rostype):
+def _from_list_inst(inst, rostype, options=None):
     # Can duck out early if the list is empty
     if len(inst) == 0:
         return []
@@ -169,15 +171,19 @@ def _from_list_inst(inst, rostype):
         return list(inst)
 
     # Call to _to_inst for every element of the list
-    return [_from_inst(x, rostype) for x in inst]
+    return [_from_inst(x, rostype, options=options) for x in inst]
 
 
-def _from_object_inst(inst, rostype):
+def _from_object_inst(inst, rostype, options=None):
     # Create an empty dict then populate with values from the inst
     msg = {}
+    options = options if options else {}
+    add_ros_type_to_inst = bool(options.get("add_ros_type_to_inst", False))
+    if add_ros_type_to_inst:
+        msg[ros_type_field_name] = rostype
     for field_name, field_rostype in zip(inst.__slots__, inst._slot_types):
         field_inst = getattr(inst, field_name)
-        msg[field_name] = _from_inst(field_inst, field_rostype)
+        msg[field_name] = _from_inst(field_inst, field_rostype, options=options)
     return msg
 
 
@@ -286,6 +292,10 @@ def _to_object_inst(msg, rostype, roottype, inst, stack):
     for field_name in msg:
         # Add this field to the field stack
         field_stack = stack + [field_name]
+
+        # If field_name is ROS type, ignore it
+        if field_name in (ros_type_field_name,):
+            continue
 
         # Raise an exception if the msg contains a bad field
         if not field_name in inst_fields:

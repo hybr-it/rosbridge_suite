@@ -222,6 +222,7 @@ if __name__ == "__main__":
             else:
                 application.listen(port, address)
             rospy.loginfo("Rosbridge WebSocket server started on port %d", port)
+            rospy.loginfo("Modified version for HybrIT project")
             connected = True
         except error as e:
             rospy.logwarn("Unable to start server: " + str(e) +
