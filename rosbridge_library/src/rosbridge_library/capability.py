@@ -47,15 +47,16 @@ class Capability:
 
     """
 
-    def __init__(self, protocol):
+    def __init__(self, protocol, options=None):
         """ Abstract class constructor.  All capabilities require a handle to
         the containing protocol.
 
         Keyword arguments:
         protocol -- the protocol instance for this capability instance
-
+        options -- dictionary of capability-specific options
         """
         self.protocol = protocol
+        self.options = dict(options) if options else {}
 
     def handle_message(self, message):
         """ Handle an incoming message.

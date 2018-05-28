@@ -353,7 +353,7 @@ class Protocol:
         if opcode in self.operations:
             del self.operations[opcode]
 
-    def add_capability(self, capability_class):
+    def add_capability(self, capability_class, *args, **kwargs):
         """ Add a capability to the protocol.
 
         This method is for convenience; assumes the default capability
@@ -363,7 +363,7 @@ class Protocol:
         capability_class -- the class of the capability to add
 
         """
-        self.capabilities.append(capability_class(self))
+        self.capabilities.append(capability_class(self, *args, **kwargs))
 
     def log(self, level, message, lid=None):
         """ Log a message to the client.  By default just sends to stdout

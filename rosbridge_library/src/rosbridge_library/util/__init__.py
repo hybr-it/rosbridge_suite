@@ -25,3 +25,5 @@ except AttributeError:
         "Please use the MongoDB BSON implementation. "
         "See: https://github.com/RobotWebTools/rosbridge_suite/issues/198"
     )
+
+from atomicint import AtomicInteger

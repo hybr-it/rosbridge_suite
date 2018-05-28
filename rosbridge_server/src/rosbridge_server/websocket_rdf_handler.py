@@ -39,10 +39,10 @@ from functools import partial
 from tornado.ioloop import IOLoop
 from tornado.websocket import WebSocketHandler
 
-from rosbridge_library.rosbridge_protocol import RosbridgeProtocol
+from rosbridge_library.rosbridge_rdf_protocol import RosbridgeRDFProtocol
 from rosbridge_library.util import json, bson
 
-class RosbridgeWebSocket(WebSocketHandler):
+class RosbridgeWebSocketRDF(WebSocketHandler):
     client_id_seed = 0
     clients_connected = 0
     authenticate = False
@@ -66,7 +66,7 @@ class RosbridgeWebSocket(WebSocketHandler):
             "bson_only_mode": cls.bson_only_mode
         }
         try:
-            self.protocol = RosbridgeProtocol(int(cls.client_id_seed), parameters=parameters)
+            self.protocol = RosbridgeRDFProtocol(int(cls.client_id_seed), parameters=parameters)
             self.protocol.outgoing = self.send_message
             self.set_nodelay(True)
             self.authenticated = False
@@ -74,7 +74,7 @@ class RosbridgeWebSocket(WebSocketHandler):
             cls.clients_connected += 1
         except Exception as exc:
             rospy.logerr("Unable to accept incoming connection.  Reason: %s", str(exc))
-        rospy.loginfo("Client connected.  %d clients total.", cls.clients_connected)
+        rospy.loginfo("RDF Client connected.  %d clients total.", cls.clients_connected)
         if cls.authenticate:
             rospy.loginfo("Awaiting proper authentication...")
 
@@ -113,7 +113,7 @@ class RosbridgeWebSocket(WebSocketHandler):
         cls = self.__class__
         cls.clients_connected -= 1
         self.protocol.finish()
-        rospy.loginfo("Client disconnected. %d clients total.", cls.clients_connected)
+        rospy.loginfo("RDF Client disconnected. %d clients total.", cls.clients_connected)
 
     def send_message(self, message):
         binary = type(message)==bson.BSON
