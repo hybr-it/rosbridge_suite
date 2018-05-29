@@ -14,7 +14,7 @@ class AdvertisedServiceHandler():
     id_counter = 1
     responses = {}
 
-    def __init__(self, service_name, service_type, protocol):
+    def __init__(self, service_name, service_type, protocol, add_ros_type_to_message=False):
         self.active_requests = 0
         self.shutdown_requested = False
         self.lock = Lock()
@@ -23,6 +23,7 @@ class AdvertisedServiceHandler():
         self.protocol = protocol
         # setup the service
         self.service_handle = rospy.Service(service_name, get_service_class(service_type), self.handle_request)
+        self.add_ros_type_to_message = add_ros_type_to_message
 
     def next_id(self):
         id = self.id_counter
@@ -40,7 +41,7 @@ class AdvertisedServiceHandler():
             "op": "call_service",
             "id": request_id,
             "service": self.service_name,
-            "args": message_conversion.extract_values(req)
+            "args": message_conversion.extract_values(req, options={"add_ros_type_to_inst": self.add_ros_type_to_message})
         }
         self.protocol.send(request_message)
 
@@ -84,9 +85,10 @@ class AdvertiseService(Capability):
 
     advertise_service_msg_fields = [(True, "service", string_types), (True, "type", string_types)]
 
-    def __init__(self, protocol):
+    def __init__(self, protocol, options=None):
         # Call superclass constructor
-        Capability.__init__(self, protocol)
+        Capability.__init__(self, protocol, options=options)
+        self.add_ros_type_to_message = bool(self.options.get("add_ros_type_to_message", False))
 
         # Register the operations that this capability provides
         protocol.register_operation("advertise_service", self.advertise_service)
@@ -120,6 +122,7 @@ class AdvertiseService(Capability):
 
         # setup and store the service information
         service_type = message["type"]
-        service_handler = AdvertisedServiceHandler(service_name, service_type, self.protocol)
+        service_handler = AdvertisedServiceHandler(service_name, service_type, self.protocol,
+                                                   add_ros_type_to_message=self.add_ros_type_to_message)
         self.protocol.external_service_list[service_name] = service_handler
         self.protocol.log("info", "Advertised service %s." % service_name)

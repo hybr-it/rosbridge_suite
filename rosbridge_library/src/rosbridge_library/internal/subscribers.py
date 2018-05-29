@@ -50,7 +50,7 @@ class MultiSubscriber():
     callbacks being called in separate threads, must lock whenever modifying
     or accessing the subscribed clients. """
 
-    def __init__(self, topic, msg_type=None):
+    def __init__(self, topic, msg_type=None, options=None):
         """ Register a subscriber on the specified topic.
 
         Keyword arguments:
@@ -91,6 +91,9 @@ class MultiSubscriber():
         self.topic = topic
         self.msg_class = msg_class
         self.subscriber = Subscriber(topic, msg_class, self.callback)
+        self.options = dict(options) if options else {}
+        self.extract_values_options = dict(add_ros_type_to_inst=bool(options.get("add_ros_type_to_message", False)))
+
 
     def unregister(self):
         self.subscriber.unregister()
@@ -140,6 +143,10 @@ class MultiSubscriber():
         with self.lock:
             del self.subscriptions[client_id]
 
+    def has_client_id(self, client_id):
+        with self.lock:
+            return client_id in self.subscriptions
+
     def has_subscribers(self):
         """ Return true if there are subscribers """
         with self.lock:
@@ -160,7 +167,7 @@ class MultiSubscriber():
         # Try to convert the msg to JSON
         json = None
         try:
-            json = message_conversion.extract_values(msg)
+            json = message_conversion.extract_values(msg, options=self.extract_values_options)
         except Exception as exc:
             logerr("Exception while converting messages in subscriber callback : %s", exc)
             return
@@ -188,7 +195,16 @@ class SubscriberManager():
     def __init__(self):
         self._subscribers = {}
 
-    def subscribe(self, client_id, topic, callback, msg_type=None):
+    def get_subscriber_key(self, topic, options=None):
+        # defaults
+        _options = {"add_ros_type_to_message": False}
+        if options:
+            _options.update(options)
+        options = _options
+        subscriber_key = (topic, frozenset(options.items()))
+        return subscriber_key
+
+    def subscribe(self, client_id, topic, callback, msg_type=None, options=None):
         """ Subscribe to a topic
 
         Keyword arguments:
@@ -198,13 +214,16 @@ class SubscriberManager():
         msg_type  -- (optional) the type of the topic
 
         """
-        if not topic in self._subscribers:
-            self._subscribers[topic] = MultiSubscriber(topic, msg_type)
+
+        subscriber_key = self.get_subscriber_key(topic, options=options)
+
+        if not subscriber_key in self._subscribers:
+            self._subscribers[subscriber_key] = MultiSubscriber(topic, msg_type, options=options)
 
         if msg_type is not None:
-            self._subscribers[topic].verify_type(msg_type)
+            self._subscribers[subscriber_key].verify_type(msg_type)
 
-        self._subscribers[topic].subscribe(client_id, callback)
+        self._subscribers[subscriber_key].subscribe(client_id, callback)
 
     def unsubscribe(self, client_id, topic):
         """ Unsubscribe from a topic
@@ -214,14 +233,21 @@ class SubscriberManager():
         topic     -- the topic to unsubscribe from
 
         """
-        if not topic in self._subscribers:
-            return
 
-        self._subscribers[topic].unsubscribe(client_id)
+        subscriber_key = None
+        subscriber = None
+        found = False
+        for subscriber_key, subscriber in self._subscribers.items():
+            if topic == subscriber_key[0] and subscriber.has_client_id(client_id):
+                found = True
+                break
 
-        if not self._subscribers[topic].has_subscribers():
-            self._subscribers[topic].unregister()
-            del self._subscribers[topic]
+        if found:
+            subscriber.unsubscribe(client_id)
+
+            if not subscriber.has_subscribers():
+                subscriber.unregister()
+                del self._subscribers[subscriber_key]
 
 
 manager = SubscriberManager()

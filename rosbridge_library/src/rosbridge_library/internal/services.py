@@ -94,7 +94,7 @@ def args_to_service_request_instance(service, inst, args):
     populate_instance(msg, inst)
 
 
-def call_service(service, args=None):
+def call_service(service, args=None, options=None):
     # Given the service name, fetch the type and class of the service,
     # and a request instance
 
@@ -114,6 +114,6 @@ def call_service(service, args=None):
     response = proxy.call(inst)
 
     # Turn the response into JSON and pass to the callback
-    json_response = extract_values(response)
+    json_response = extract_values(response, options=options)
 
     return json_response

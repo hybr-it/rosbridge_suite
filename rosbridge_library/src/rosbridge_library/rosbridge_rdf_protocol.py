@@ -45,10 +45,12 @@ from rosbridge_library.capabilities.unadvertise_service import UnadvertiseServic
 
 from rosbridge_library.protocol import has_binary
 from rosbridge_library.util import json, bson
+from rosbridge_library.util import rdfutils
+import rdflib
 
 class RosbridgeRDFProtocol(Protocol):
     """ Adds the handlers for the rosbridge opcodes """
-    rosbridge_capabilities = [CallService, Advertise, Publish, Subscribe,
+    rosbridge_capabilities = [CallService, Advertise, Publish, (Subscribe, {"options": {"add_ros_type_to_message": True}}),
                               Defragment, AdvertiseService, ServiceResponse, UnadvertiseService]
 
     print("registered capabilities (classes):")
@@ -56,10 +58,18 @@ class RosbridgeRDFProtocol(Protocol):
         print(" -", str(cap))
 
     parameters = None
+    http_accept = None
+    accept_mimetypes = None
 
     def __init__(self, client_id, parameters = None):
         self.parameters = parameters
         Protocol.__init__(self, client_id)
+        if self.parameters:
+            self.http_accept = self.parameters.get("http_accept", None)
+        self.accept_mimetypes = rdfutils.get_accept_mimetypes(self.http_accept)
+        self.rdf_content_type = rdfutils.rdf_content_type(self.accept_mimetypes)
+        self.rdf_format = rdfutils.rdf_format(self.rdf_content_type)
+
         for capability_class in self.rosbridge_capabilities:
             args = []
             kwargs = {}
@@ -85,6 +95,20 @@ class RosbridgeRDFProtocol(Protocol):
 
         Returns a JSON string representing the dictionary
         """
+
+
+        rdfutils.add_jsonld_context_to_rosbridge_message(msg)
+
+        if self.rdf_content_type and self.rdf_content_type != "application/ld+json":
+            try:
+                rdf_graph = rdflib.Graph().parse(data=json.dumps(msg), format='json-ld')
+                result, content_type = rdfutils.serialize_rdf_graph(rdf_graph, self.rdf_content_type)
+                if result:
+                    return result
+            except Exception as e:
+                self.log("error", "Exception in serialization of %s RDF content type: %s" % (self.rdf_content_type, e))
+                return None
+
         try:
             if has_binary(msg) or self.bson_only_mode:
                 return bson.BSON.encode(msg)
@@ -110,6 +134,17 @@ class RosbridgeRDFProtocol(Protocol):
         Returns a dictionary of values
 
         """
+
+        if self.rdf_format:
+            try:
+                rdf_graph = rdflib.Graph().parse(data=msg, format=self.rdf_format)
+                messages = rdfutils.extract_rosbridge_messages(rdf_graph, add_ros_type_to_object=True)
+                if messages:
+                    return messages[0][1]
+            except Exception as e:
+                self.log("error", "Exception in deserialization of %s RDF format: %s" % (self.rdf_format, e))
+                return None
+
         try:
             if self.bson_only_mode:
                 bson_message = bson.BSON(msg)

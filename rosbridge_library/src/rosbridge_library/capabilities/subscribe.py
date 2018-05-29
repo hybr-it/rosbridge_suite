@@ -83,7 +83,7 @@ class Subscription():
         self.clients.clear()
 
     def subscribe(self, sid=None, msg_type=None, throttle_rate=0,
-                  queue_length=0, fragment_size=None, compression="none"):
+                  queue_length=0, fragment_size=None, compression="none", options=None):
         """ Add another client's subscription request
 
         If there are multiple calls to subscribe, the values actually used for
@@ -116,7 +116,7 @@ class Subscription():
         self.update_params()
 
         # Subscribe with the manager. This will propagate any exceptions
-        manager.subscribe(self.client_id, self.topic, self.on_msg, msg_type)
+        manager.subscribe(self.client_id, self.topic, self.on_msg, msg_type, options=options)
 
     def unsubscribe(self, sid=None):
         """ Unsubscribe this particular client's subscription
@@ -189,9 +189,10 @@ class Subscribe(Capability):
 
     topics_glob = None
 
-    def __init__(self, protocol):
+    def __init__(self, protocol, options=None):
         # Call superclass constructor
-        Capability.__init__(self, protocol)
+        Capability.__init__(self, protocol, options=options)
+        self.add_ros_type_to_message = bool(self.options.get("add_ros_type_to_message", False))
 
         # Register the operations that this capability provides
         protocol.register_operation("subscribe", self.subscribe)
@@ -235,7 +236,8 @@ class Subscribe(Capability):
           "throttle_rate": msg.get("throttle_rate", 0),
           "fragment_size": msg.get("fragment_size", None),
           "queue_length": msg.get("queue_length", 0),
-          "compression": msg.get("compression", "none")
+          "compression": msg.get("compression", "none"),
+          "options": dict(add_ros_type_to_message=self.add_ros_type_to_message)
         }
         self._subscriptions[topic].subscribe(**subscribe_args)
 

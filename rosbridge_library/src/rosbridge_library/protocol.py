@@ -32,7 +32,7 @@
 
 import rospy
 import time
-
+import sys, traceback
 from rosbridge_library.internal.exceptions import InvalidArgumentException
 from rosbridge_library.internal.exceptions import MissingArgumentException
 
@@ -201,6 +201,7 @@ class Protocol:
         try:
             self.operations[op](msg)
         except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
             self.log("error", "%s: %s" % (op, str(exc)), mid)
 
         # if anything left in buffer .. re-call self.incoming

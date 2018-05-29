@@ -63,7 +63,8 @@ class RosbridgeWebSocketRDF(WebSocketHandler):
             "delay_between_messages": cls.delay_between_messages,
             "max_message_size": cls.max_message_size,
             "unregister_timeout": cls.unregister_timeout,
-            "bson_only_mode": cls.bson_only_mode
+            "bson_only_mode": cls.bson_only_mode,
+            "http_accept": self.request.headers.get("Accept")
         }
         try:
             self.protocol = RosbridgeRDFProtocol(int(cls.client_id_seed), parameters=parameters)
