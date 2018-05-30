@@ -43,6 +43,7 @@ from tornado.web import Application
 
 from rosbridge_server import RosbridgeWebSocket
 from rosbridge_server import RosbridgeWebSocketRDF
+from rosbridge_server import LinkedRoboticThing
 
 from rosbridge_library.capabilities.advertise import Advertise
 from rosbridge_library.capabilities.publish import Publish
@@ -51,6 +52,7 @@ from rosbridge_library.capabilities.advertise_service import AdvertiseService
 from rosbridge_library.capabilities.unadvertise_service import UnadvertiseService
 from rosbridge_library.capabilities.call_service import CallService
 from rosbridge_library.util import AtomicInteger
+import logging
 
 def shutdown_hook():
     IOLoop.instance().stop()
@@ -248,15 +250,17 @@ if __name__ == "__main__":
     RosbridgeWebSocketRDF.client_id_seed = client_id_seed
 
     application = Application([(r"/", RosbridgeWebSocket), (r"", RosbridgeWebSocket),
-                               (r"/rdf/", RosbridgeWebSocketRDF), (r"/rdf", RosbridgeWebSocketRDF)])
+                               (r"/rdf/", RosbridgeWebSocketRDF), (r"/rdf", RosbridgeWebSocketRDF),
+                               (r"/lrt(?P<path>/.*)?", LinkedRoboticThing)
+                               ])
 
     connected = False
     while not connected and not rospy.is_shutdown():
         try:
             if certfile is not None and keyfile is not None:
-                application.listen(port, address, ssl_options={ "certfile": certfile, "keyfile": keyfile})
+                application.listen(port, address, ssl_options={ "certfile": certfile, "keyfile": keyfile}, xheaders=True)
             else:
-                application.listen(port, address)
+                application.listen(port, address, xheaders=True)
             rospy.loginfo("Rosbridge WebSocket server started on port %d", port)
             rospy.loginfo("Modified version for HybrIT project")
             connected = True

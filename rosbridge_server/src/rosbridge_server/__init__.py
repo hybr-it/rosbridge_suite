@@ -3,3 +3,4 @@ from .websocket_handler import RosbridgeWebSocket
 from .websocket_rdf_handler import RosbridgeWebSocketRDF
 from .tcp_handler import RosbridgeTcpSocket
 from .udp_handler import RosbridgeUdpSocket,RosbridgeUdpFactory
+from .linked_robotic_thing import LinkedRoboticThing

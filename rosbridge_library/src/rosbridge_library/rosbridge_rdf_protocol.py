@@ -67,8 +67,8 @@ class RosbridgeRDFProtocol(Protocol):
         if self.parameters:
             self.http_accept = self.parameters.get("http_accept", None)
         self.accept_mimetypes = rdfutils.get_accept_mimetypes(self.http_accept)
-        self.rdf_content_type = rdfutils.rdf_content_type(self.accept_mimetypes)
-        self.rdf_format = rdfutils.rdf_format(self.rdf_content_type)
+        self.rdf_content_type = rdfutils.get_rdf_content_type(self.accept_mimetypes)
+        self.rdf_format = rdfutils.get_rdf_format(self.rdf_content_type)
 
         for capability_class in self.rosbridge_capabilities:
             args = []

@@ -4,6 +4,14 @@ import rdflib.collection
 import six
 from werkzeug.datastructures import MIMEAccept
 from werkzeug.http import parse_accept_header
+import pygments
+from pygments import highlight
+from pygments.lexers.rdf import TurtleLexer
+from html_formatter import HtmlFormatter
+from pygments.filter import Filter
+from pygments.token import Name
+
+URI = Name.Variable.URI
 
 # Special RDF type for highlighted HTML
 RDF_HIGHLIGHTED_HTML = 'rdf-highlighted-html'
@@ -30,30 +38,60 @@ except rdflib.plugin.PluginException:
     pass
 
 
+class LinkFilter(Filter):
+    def __init__(self, **options):
+        Filter.__init__(self, **options)
+
+    def filter(self, lexer, stream):
+        for ttype, value in stream:
+            if ttype is pygments.token.Name.Variable and value.startswith('<') and value.endswith('>'):
+                ttype = URI
+                value = value[1:-1]
+            yield ttype, value
+
+
+class MyHtmlFormatter(HtmlFormatter):
+    def format_parts(self, ttype, value, parts):
+        if ttype is URI:
+            parts[0] = "&lt;<a href=\"{}\">{}</a>&gt;".format(value, parts[0])
+        return parts
+
+
 def get_accept_mimetypes(accept_header):
     return parse_accept_header(accept_header, MIMEAccept)
 
 
-def rdf_content_type(accept_mimetypes):
+def convert_rdf_to_html(rdf_graph):
+    rdf_turtle = rdf_graph.serialize(format='turtle')
+    # highlight
+    formatter = MyHtmlFormatter(full=True)
+    lexer = TurtleLexer()
+    lexer.add_filter(LinkFilter())
+    result = highlight(rdf_turtle, lexer, formatter)
+    return result
+
+
+def get_rdf_content_type(accept_mimetypes):
     if not isinstance(accept_mimetypes, MIMEAccept):
         accept_mimetypes = get_accept_mimetypes(accept_mimetypes)
     return accept_mimetypes.best_match(six.iterkeys(RDF_MIMETYPES))
 
-def rdf_format(content_type):
+
+def get_rdf_format(content_type):
     return RDF_MIMETYPES.get(content_type)
+
 
 def serialize_rdf_graph(rdf_graph, accept_mimetypes=None, content_type=None):
     """Returns tuple (serialized_rdf_str, rdf_content_type_str)"""
     if content_type is None:
-        content_type = rdf_content_type(accept_mimetypes)
-    rdf_format = RDF_MIMETYPES.get(content_type)
+        content_type = get_rdf_content_type(accept_mimetypes)
+    rdf_format = get_rdf_format(content_type)
     if rdf_format and rdf_format != RDF_HIGHLIGHTED_HTML:
         result = rdf_graph.serialize(format=rdf_format)
         return result, content_type
 
-    return None, None
     # Output as highlighted HTML
-    # return Response(convert_rdf_to_html(rdf_graph), mimetype="text/html")
+    return convert_rdf_to_html(rdf_graph), "text/html"
 
 
 ROS = rdflib.Namespace("http://ros.org/#")
@@ -95,7 +133,7 @@ def _add_jsonld_context_to(value, top_context_base=None):
     elif isinstance(value, (tuple, list)):
         for item in value:
             _add_jsonld_context_to(item)
-    if context is not None:
+    if is_dict and context is not None:
         value["@context"] = context
     return context
 
@@ -141,18 +179,18 @@ def ros_rdf_to_python(graph, node, **kwargs):
         return None, [ros_rdf_to_python(graph, i, **kwargs)[1] for i in cl]
     elif isinstance(node, rdflib.URIRef) or isinstance(node, rdflib.BNode):
         val = {}
-        type = None
+        rostype = None
         for s, p, o in graph.triples((node, None, None)):
             if isinstance(p, rdflib.URIRef) and p.startswith(ROS):
                 prefix, namespace, name = graph.compute_qname(p)
                 member_type, member_value = ros_rdf_to_python(graph, o, **kwargs)
                 if name == "Type":
-                    type = member_value
+                    rostype = member_value
                     if add_ros_type_to_object:
                         val[ROS_TYPE_FIELD_NAME] = member_value
                 else:
                     val[name] = member_value
-        return type, val
+        return rostype, val
     return None, None
 
 
@@ -168,3 +206,43 @@ def extract_rosbridge_messages(graph, **kwargs):
     for s, p, o in graph.triples((None, rdflib.RDF.type, ROSBRIDGE.Message)):
         messages.append(s)
     return [ros_rdf_to_python(graph, m, **kwargs) for m in messages]
+
+
+def get_reachable_statements(node, graph, seen=None):
+    """
+    Computes fix point of all blank nodes reachable from passed node
+    :return: list of statements
+    """
+    if seen is None:
+        seen = {}
+    if node in seen:
+        return
+    seen[node] = 1
+    for stmt in graph.triples((node, None, None)):
+        yield stmt
+        obj = stmt[2]
+        if isinstance(obj, rdflib.BNode):
+            for i in get_reachable_statements(obj, graph, seen):
+                yield i
+
+
+def replace_uri_base(stmts, old_base, new_base):
+    if old_base.endswith('/'):
+        old_base = old_base[:-1]
+    if new_base.endswith('/'):
+        new_base = new_base[:-1]
+
+    def replace_node(node):
+        if isinstance(node, rdflib.URIRef):
+            uri = node.toPython()
+            if uri == old_base:
+                node = rdflib.URIRef(new_base)
+            elif uri.startswith(old_base) and uri[len(old_base)] == '/':
+                node = rdflib.URIRef(new_base + uri[len(old_base):])
+        return node
+
+    for s, p, o in stmts:
+        new_s = replace_node(s)
+        new_p = replace_node(p)
+        new_o = replace_node(o)
+        yield (new_s, new_p, new_o)

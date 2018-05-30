@@ -3,3 +3,4 @@ rdflib-jsonld
 websocket-client
 Werkzeug
 six
+Pygments
