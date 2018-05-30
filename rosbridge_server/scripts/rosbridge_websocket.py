@@ -59,6 +59,15 @@ if __name__ == "__main__":
     rospy.init_node("rosbridge_websocket")
     rospy.on_shutdown(shutdown_hook)    # register shutdown hook to stop the server
 
+    # Added debug logging to console
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    # add the handlers to the logger
+    logging.getLogger().addHandler(ch)
+
     ##################################################
     # Parameter handling                             #
     ##################################################
