@@ -1,0 +1,17 @@
+import lrt_debug as debug
+import sys
+
+DEBUG_EMPTY_RDF_GRAPH = False
+DEBUG_NO_NOTIFICATION_REQUESTS = False
+DEBUG_NO_GET_TRANSFORM = False
+DEBUG_NO_FRAME_UPDATES = False
+DEBUG_NO_PER_FRAME_RDF_SERIALIZATION = False
+
+DEBUG_RDF = None
+
+debug.enable(False)
+debug.log("DEBUG_EMPTY_RDF_GRAPH =", DEBUG_EMPTY_RDF_GRAPH, file=sys.stderr)
+debug.log("DEBUG_NO_NOTIFICATION_REQUESTS =", DEBUG_NO_NOTIFICATION_REQUESTS, file=sys.stderr)
+debug.log("DEBUG_NO_GET_TRANSFORM =", DEBUG_NO_GET_TRANSFORM, file=sys.stderr)
+debug.log("DEBUG_NO_FRAME_UPDATES =", DEBUG_NO_FRAME_UPDATES, file=sys.stderr)
+debug.log("DEBUG_NO_PER_FRAME_RDF_SERIALIZATION =", DEBUG_NO_PER_FRAME_RDF_SERIALIZATION, file=sys.stderr)

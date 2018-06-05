@@ -44,7 +44,7 @@ from ros import rosnode, rosgraph
 from rosnode import get_node_names
 from rosgraph.masterapi import Master
 
-from rosapi.msg import TypeDef
+#from rosapi.msg import TypeDef
 
 from .glob_helper import filter_globs, any_match
 

@@ -61,8 +61,8 @@ def get_accept_mimetypes(accept_header):
     return parse_accept_header(accept_header, MIMEAccept)
 
 
-def convert_rdf_to_html(rdf_graph):
-    rdf_turtle = rdf_graph.serialize(format='turtle')
+def convert_rdf_to_html(rdf_graph, base=None, encoding=None, **args):
+    rdf_turtle = rdf_graph.serialize(base=base, encoding=encoding, format='turtle', **args)
     # highlight
     formatter = MyHtmlFormatter(full=True)
     lexer = TurtleLexer()
@@ -81,17 +81,22 @@ def get_rdf_format(content_type):
     return RDF_MIMETYPES.get(content_type)
 
 
-def serialize_rdf_graph(rdf_graph, accept_mimetypes=None, content_type=None):
+def serialize_rdf_graph(rdf_graph, accept_mimetypes=None, content_type=None,
+                        destination=None, base=None, encoding=None, **args):
     """Returns tuple (serialized_rdf_str, rdf_content_type_str)"""
     if content_type is None:
         content_type = get_rdf_content_type(accept_mimetypes)
     rdf_format = get_rdf_format(content_type)
     if rdf_format and rdf_format != RDF_HIGHLIGHTED_HTML:
-        result = rdf_graph.serialize(format=rdf_format)
+        result = rdf_graph.serialize(destination=destination,
+                                     format=rdf_format,
+                                     base=base,
+                                     encoding=encoding,
+                                     **args)
         return result, content_type
 
     # Output as highlighted HTML
-    return convert_rdf_to_html(rdf_graph), "text/html"
+    return convert_rdf_to_html(rdf_graph, base=base, encoding=encoding, **args), "text/html"
 
 
 ROS = rdflib.Namespace("http://ros.org/#")
@@ -226,11 +231,13 @@ def get_reachable_statements(node, graph, seen=None):
                 yield i
 
 
+def add_slash(s):
+    return s if s.endswith('/') else s + '/'
+
+
 def replace_uri_base(stmts, old_base, new_base):
-    if old_base.endswith('/'):
-        old_base = old_base[:-1]
-    if new_base.endswith('/'):
-        new_base = new_base[:-1]
+    old_base = old_base.rstrip('/')
+    new_base = new_base.rstrip('/')
 
     def replace_node(node):
         if isinstance(node, rdflib.URIRef):
