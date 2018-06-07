@@ -75,6 +75,12 @@ def copy_end_slash(p1, p2):
     return p1
 
 
+def slash_at_start(s):
+    return s if s.startswith('/') else '/' + s
+
+def slash_at_end(s):
+    return s if s.endswith('/') else s + '/'
+
 class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def initialize(self, path_prefix=None):
@@ -82,14 +88,16 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         self.url_map = Map([
             Rule('/', endpoint='index'),
             Rule('/topics/', endpoint='all_topics'),
-            Rule('/topics/<path:topic_name>/', endpoint='topic_by_name'),
+            Rule('/topics/<path:topic_name>/', endpoint='get_topic_by_name', methods=["GET"]),
+            Rule('/topics/<path:topic_name>/', endpoint='post_topic_by_name', methods=["POST"]),
             Rule('/topics/<path:topic_name>/subscriptions/', endpoint='all_topic_subscriptions'),
             Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='topic_subscription_by_id')
         ])
 
         self.views = {
             'index': self.index,
-            'topic_by_name': self.topic_by_name,
+            'get_topic_by_name': self.get_topic_by_name,
+            'post_topic_by_name': self.post_topic_by_name,
             'all_topics': self.all_topics,
             'all_topic_subscriptions': self.all_topic_subscriptions,
             'topic_subscription_by_id': self.topic_subscription_by_id
@@ -102,7 +110,15 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         pass
 
     def slash_redirect(self):
-        self.redirect(rdfutils.add_slash(self.request.protocol + "://" + self.request.host + self.request.path))
+        self.redirect(slash_at_end(self.full_request_url()))
+
+    def full_request_url(self):
+        # returns same as self.request.full_url()
+        # FIXME add support for additional X-* headers
+        return self.request.protocol + "://" + self.request.host + self.request.path
+
+    def full_root_url(self):
+        return self.request.protocol + "://" + self.request.host + self.path_prefix
 
     def dispatch_request(self, path_info, method=None):
         if not path_info:
@@ -110,9 +126,15 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             self.slash_redirect()
             return
 
-        wsgi_environ = tornado.wsgi.WSGIContainer.environ(self.request)
-        wsgi_environ['SCRIPT_NAME'] = self.path_prefix
-        urls = self.url_map.bind_to_environ(wsgi_environ)
+        #wsgi_environ = tornado.wsgi.WSGIContainer.environ(self.request)
+        #wsgi_environ['SCRIPT_NAME'] = self.path_prefix
+        #urls = self.url_map.bind_to_environ(wsgi_environ)
+
+        urls = self.url_map.bind(server_name=self.request.host.lower(),
+                                 script_name=self.path_prefix,
+                                 url_scheme=self.request.protocol,
+                                 default_method=self.request.method,
+                                 query_args=self.request.query)
 
         try:
             endpoint, args = urls.match(path_info=path_info, method=method)
@@ -123,11 +145,18 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(e.code, reason=e.description)
         self.views[endpoint](path_info=path_info, **args)
 
+    # Tornado HTTP handlers
+
     def get(self, path):
         self.dispatch_request(path_info=path, method="GET")
 
+    def post(self, path):
+        self.dispatch_request(path_info=path, method="POST")
+
+    # Logic Handlers
+
     def index(self, path_info=None):
-        print('HIT index', file=sys.stderr)
+        print('GET index', file=sys.stderr)
         self.get_graph()
 
     # Topics
@@ -144,12 +173,10 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         return topic_node
 
     def all_topics(self, path_info=None):
-        print('HIT all_topics')
+        print('GET all_topics')
         graph = hybrit_graph()
 
-        request_path = copy_end_slash(self.request.path[:-len(path_info)] if path_info else self.request.path,
-                                      self.request.path)
-        this_url = self.request.protocol + "://" + self.request.host + request_path
+        this_url = self.full_request_url()
 
         this_resource = rdflib.URIRef(this_url)
 
@@ -164,16 +191,13 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         self.write_graph(graph, base=this_url)
 
-    def topic_by_name(self, path_info, topic_name):
-        print('HIT topic_by_name(%r)' % (topic_name,), file=sys.stderr)
+    def get_topic_by_name(self, path_info, topic_name):
+        print('GET topic_by_name(%r)' % (topic_name,), file=sys.stderr)
         graph = hybrit_graph()
 
-        request_path = copy_end_slash(self.request.path[:-len(path_info)] if path_info else self.request.path,
-                                      self.request.path)
-        this_url = self.request.protocol + "://" + self.request.host + request_path
+        this_url = self.full_request_url()
 
-        if not topic_name.startswith('/'):
-            topic_name = '/' + topic_name
+        topic_name = slash_at_start(topic_name)
 
         this_resource = rdflib.URIRef(this_url)
 
@@ -181,29 +205,37 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(404, reason="No such topic: %s" % (topic_name,))
         self.write_graph(graph, base=this_url)
 
+    def post_topic_by_name(self, path_info, topic_name):
+        print('POST post_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
+        topic_name = slash_at_start(topic_name)
 
     # Subscriptions
 
     def all_topic_subscriptions(self, path_info, topic_name):
-        print('HIT all_topic_subscriptions(%r)' % (topic_name,), file=sys.stderr)
+        print('GET all_topic_subscriptions(%r)' % (topic_name,), file=sys.stderr)
+
+        topic_name = slash_at_start(topic_name)
 
         def subscr_filter(subscr):
             target_path = getattr(subscr, 'target_path')
             return target_path and target_path in ('/transforms', '/transforms/')
 
-        request_path = copy_end_slash(self.request.path[:-len(path_info)] if path_info else self.request.path, self.request.path)
-        this_url = self.request.protocol + "://" + self.request.host + request_path
+        this_url = self.full_request_url()
 
         this_resource = rdflib.URIRef(this_url)
 
         graph = subscriptions.hybrit_graph()
+        graph.add((this_resource, rdflib.RDF.type, LDP.BasicContainer))
+        graph.add((this_resource, rdflib.RDF.type, LDP.Container))
+        graph.add((this_resource, DCTERMS.title, rdflib.Literal("a list of subscriptions to topic %s" % (topic_name,))))
+
         for subscr in subscriptions.filter_subscriptions(filter_func=subscr_filter):
             graph.add((this_resource, subscriptions.HYBRIT.subscription, subscr.rdf_node()))
 
         self.write_graph(graph, base=this_url)
 
     def topic_subscription_by_id(self, path_info, topic_name, id):
-        print('HIT topic_subscription_by_id(%r,%r)' % (topic_name, id), file=sys.stderr)
+        print('GET topic_subscription_by_id(%r,%r)' % (topic_name, id), file=sys.stderr)
         raise tornado.web.HTTPError(404)
 
     # Utilities
@@ -230,8 +262,8 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         # self.request.full_url()
         # self.request.path
-        request_path = copy_end_slash(self.request.path[:-len(path)] if path else self.request.path, self.request.path)
-        url_root = rdfutils.add_slash(self.request.protocol + "://" + self.request.host + request_path)
+        root_path = copy_end_slash(self.request.path[:-len(path)] if path else self.request.path, self.request.path)
+        url_root = slash_at_end(self.request.protocol + "://" + self.request.host + root_path)
         reachable = rdfutils.replace_uri_base(reachable, UUID_URI, url_root)
 
         is_empty = True
