@@ -30,6 +30,9 @@ RDF_MIMETYPES = {
     'text/html': RDF_HIGHLIGHTED_HTML
 }
 
+# used to filter out mimetypes that can't be parsed
+NON_PARSEABLE_RDF_MIMETYPES = ["text/plain", "application/json"]
+
 try:
     rdflib.plugin.get('json-ld', rdflib.serializer.Serializer)
     RDF_MIMETYPES['application/json'] = 'json-ld'
@@ -79,6 +82,17 @@ def get_rdf_content_type(accept_mimetypes):
 
 def get_rdf_format(content_type):
     return RDF_MIMETYPES.get(content_type)
+
+
+def get_parseable_rdf_format(content_type):
+    if content_type not in NON_PARSEABLE_RDF_MIMETYPES:
+        return RDF_MIMETYPES.get(content_type)
+    else:
+        return None
+
+
+def get_parseable_rdf_mimetypes():
+    return [k for k in RDF_MIMETYPES.keys() if k not in NON_PARSEABLE_RDF_MIMETYPES]
 
 
 def serialize_rdf_graph(rdf_graph, accept_mimetypes=None, content_type=None,

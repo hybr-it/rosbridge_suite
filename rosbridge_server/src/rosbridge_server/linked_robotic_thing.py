@@ -1,4 +1,5 @@
 from __future__ import print_function
+import logging
 import rospy
 import six
 import sys
@@ -19,8 +20,11 @@ import lrt_debug_switch as debug_switch
 import lrt_subscriptions as subscriptions
 from lrt_rdf import hybrit_graph, LDP, ROS, HYBRIT
 from werkzeug.routing import Map, Rule, HTTPException, NotFound, RequestRedirect
+from rosbridge_library.internal.publishers import manager
 
 UUID_URI = 'http://{}'.format(uuid.uuid4())
+
+logger = logging.getLogger(__name__)
 
 
 def create_graph(base_name=UUID_URI):
@@ -78,12 +82,20 @@ def copy_end_slash(p1, p2):
 def slash_at_start(s):
     return s if s.startswith('/') else '/' + s
 
+
 def slash_at_end(s):
     return s if s.endswith('/') else s + '/'
 
-class LinkedRoboticThing(tornado.web.RequestHandler):
 
-    def initialize(self, path_prefix=None):
+class LinkedRoboticThing(tornado.web.RequestHandler):
+    client_id_seed = 0
+
+    def initialize(self, client_id=None, path_prefix=None):
+        cls = self.__class__
+        if client_id is None:
+            self.client_id = int(cls.client_id_seed.incr() - 1)
+        else:
+            self.client_id = client_id
         self.path_prefix = path_prefix
         self.url_map = Map([
             Rule('/', endpoint='index'),
@@ -102,9 +114,29 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             'all_topic_subscriptions': self.all_topic_subscriptions,
             'topic_subscription_by_id': self.topic_subscription_by_id
         }
+        self.accepted_rdf_mimetypes = ", ".join(rdfutils.get_parseable_rdf_mimetypes())
+
+        self._on_destroy_called = False
+
+        # Save the topics that are published on for the purposes of unregistering
+        self._published = {}
+
         if not debug_switch.DEBUG_NO_FRAME_UPDATES:  # DEBUG 4 NO FRAME UPDATES
             pass
         subscriptions.start_loop()
+
+    def __del__(self):
+        self.destroy()
+
+    def destroy(self):
+        if not self._on_destroy_called:
+            self._on_destroy_called = True
+            self.on_destroy()
+
+    def on_destroy(self):
+        for topic in self._published:
+            manager.unregister(self.client_id, topic)
+        self._published.clear()
 
     def prepare(self):
         pass
@@ -125,10 +157,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             # if path is empty or none redirect to root path
             self.slash_redirect()
             return
-
-        #wsgi_environ = tornado.wsgi.WSGIContainer.environ(self.request)
-        #wsgi_environ['SCRIPT_NAME'] = self.path_prefix
-        #urls = self.url_map.bind_to_environ(wsgi_environ)
 
         urls = self.url_map.bind(server_name=self.request.host.lower(),
                                  script_name=self.path_prefix,
@@ -208,6 +236,34 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     def post_topic_by_name(self, path_info, topic_name):
         print('POST post_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
         topic_name = slash_at_start(topic_name)
+
+        topic_type = proxy.get_topic_type(topic_name, topics_glob)
+        if not topic_type:
+            raise tornado.web.HTTPError(404, reason="No such topic: %s" % (topic_name,))
+
+        content_type = self.request.headers.get("Content-Type", "")
+        rdf_format = rdfutils.get_parseable_rdf_format(content_type)
+        self.set_header("Accept-Post", self.accepted_rdf_mimetypes)
+        if not rdf_format:
+            raise tornado.web.HTTPError(415)
+        try:
+            rdf_graph = hybrit_graph().parse(data=self.request.body, format=rdf_format)
+            messages = rdfutils.extract_ros_messages(rdf_graph, add_ros_type_to_object=True)
+            debug.log(messages)
+        except Exception as e:
+            msg = "Exception in deserialization of %s RDF content type" % rdf_format
+            logging.exception(msg)
+            raise tornado.web.HTTPError(400, reason=msg)
+        latch = False
+        queue_size = 100
+
+        # Register as a publishing client, propagating any exceptions
+        manager.register(self.client_id, topic_name, latch=latch, queue_size=queue_size)
+        self._published[topic_name] = True
+
+        # Publish the message
+        for type, message in messages:
+            manager.publish(self.client_id, topic_name, message, latch=latch, queue_size=queue_size)
 
     # Subscriptions
 

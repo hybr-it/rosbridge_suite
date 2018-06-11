@@ -248,6 +248,7 @@ if __name__ == "__main__":
     client_id_seed = AtomicInteger()
     RosbridgeWebSocket.client_id_seed = client_id_seed
     RosbridgeWebSocketRDF.client_id_seed = client_id_seed
+    LinkedRoboticThing.client_id_seed = client_id_seed
 
     application = Application([(r"/", RosbridgeWebSocket), (r"", RosbridgeWebSocket),
                                (r"/rdf/", RosbridgeWebSocketRDF), (r"/rdf", RosbridgeWebSocketRDF),
