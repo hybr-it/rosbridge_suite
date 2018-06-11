@@ -8,11 +8,12 @@ import threading
 import time
 import six
 import requests
-from rdflib import Graph, Literal, URIRef, Namespace
+from rdflib import Graph, Literal, URIRef, Namespace, RDF
+from rdflib.namespace import XSD, DCTERMS
 import six.moves.urllib as urllib
 import lrt_debug_switch as debug_switch
 import lrt_debug as debug
-from lrt_rdf import hybrit_graph, SUBSCRIPTION
+from lrt_rdf import hybrit_graph, SUBSCRIPTION, ROS, HYBRIT
 import concurrent.futures
 import atexit
 
@@ -232,14 +233,19 @@ def start_loop():
 
 
 class Subscription(object):
-    def __init__(self, callback=None):
+    def __init__(self, callback=None, context=None):
         self._id = uuid.uuid4()
         self._callback = callback
+        self._context = context
         self.last_time = 0
 
     @property
     def id(self):
         return str(self._id)
+
+    @property
+    def context(self):
+        return self._context
 
     def register(self):
         return _HANDLER.register_subscription(self)
@@ -259,8 +265,8 @@ class Subscription(object):
 
 
 class WebhookSubscription(Subscription):
-    def __init__(self, target_resource, callback_url, callback=None, content_type="text/turtle"):
-        super(WebhookSubscription, self).__init__(callback=callback)
+    def __init__(self, target_resource, callback_url, content_type="text/turtle", callback=None, context=None):
+        super(WebhookSubscription, self).__init__(callback=callback, context=context)
         self.target_resource = target_resource
         self.target_parsed_url = urllib.parse.urlsplit(target_resource)
         self.callback_url = callback_url
@@ -270,21 +276,30 @@ class WebhookSubscription(Subscription):
     def target_path(self):
         return self.target_parsed_url.path
 
-    def to_rdf(self, resource_uri=None, graph=None):
+    def to_rdf(self, base_uri=None, graph=None):
         graph = hybrit_graph(graph)
 
-        if resource_uri:
-            # FIXME possibly we need to change uri base of the target_resource here
-            pass
+        if base_uri:
+            target_resource = urllib.parse.urljoin(base_uri, url=self.target_parsed_url[2])
+        else:
+            target_resource = self.target_resource
 
         subscr_node = self.rdf_node()
+        graph.add((subscr_node, RDF.type, HYBRIT.Subscription))
+        graph.add((subscr_node, RDF.type, HYBRIT.WebCallback))
         graph.add((subscr_node, SUBSCRIPTION.type, Literal("webhook")))
-        graph.add((subscr_node, SUBSCRIPTION.targetResource, URIRef(self.target_resource)))
-        graph.add((subscr_node, SUBSCRIPTION.contentType, Literal(self.content_type)))
-        graph.add((subscr_node, SUBSCRIPTION.callbackUrl, URIRef(self.callback_url)))
+        graph.add((subscr_node, HYBRIT.onResource, URIRef(target_resource)))
+        graph.add((subscr_node, SUBSCRIPTION.targetResource, URIRef(target_resource)))
+        graph.add((subscr_node, HYBRIT.mediaType, Literal(self.content_type)))
+        graph.add((subscr_node, HYBRIT.callbackUrl, Literal(self.callback_url, datatype=XSD.anyURI)))
+        graph.add((subscr_node, DCTERMS.identifier, Literal(str(self.id))))
 
         return graph
 
-    def rdf_node(self):
-        subscr_uri = urllib.parse.urljoin(self.target_resource, 'subscriptions/{}'.format(self.id))
+    def rdf_node(self, base_uri=None):
+        if base_uri:
+            target_resource = urllib.parse.urljoin(base_uri, url=self.target_parsed_url[2])
+        else:
+            target_resource = self.target_resource
+        subscr_uri = urllib.parse.urljoin(target_resource, 'subscriptions/{}'.format(self.id))
         return URIRef(subscr_uri)

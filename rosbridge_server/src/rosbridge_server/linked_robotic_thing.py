@@ -26,6 +26,13 @@ UUID_URI = 'http://{}'.format(uuid.uuid4())
 
 logger = logging.getLogger(__name__)
 
+HTTP_OK = 200
+HTTP_NO_CONTENT = 204
+HTTP_BAD_REQUEST = 400
+HTTP_NOT_FOUND = 404
+HTTP_UNSUPPORTED_MEDIA_TYPE = 415
+HTTP_INTERNAL_SERVER_ERROR = 500
+HTTP_NOT_IMPLEMENTED = 501
 
 def create_graph(base_name=UUID_URI):
     text = """
@@ -221,16 +228,33 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def get_topic_by_name(self, path_info, topic_name):
         print('GET topic_by_name(%r)' % (topic_name,), file=sys.stderr)
-        graph = hybrit_graph()
+
+        topic_name = slash_at_start(topic_name)
 
         this_url = self.full_request_url()
 
-        topic_name = slash_at_start(topic_name)
+        # Handle Webhook Subscription
+        if self.request.headers.get('Upgrade') in ('webhook', 'callback'):
+            callback_url = self.request.headers.get('Callback')
+            if not callback_url:
+                raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reasone='Missing callback header')
+            subscr = subscriptions.WebhookSubscription(
+                target_resource=this_url,
+                callback_url=callback_url,
+                callback=None,
+                context={"topic": topic_name})
+            subscr.register()
+            graph = subscr.to_rdf()
+            print("new callback " + this_url + " " + callback_url)
+            self.write_graph(graph, base=this_url)
+            return
+
+        graph = hybrit_graph()
 
         this_resource = rdflib.URIRef(this_url)
 
         if not self.add_topic_node_to_graph(graph, this_resource, topic_name):
-            raise tornado.web.HTTPError(404, reason="No such topic: %s" % (topic_name,))
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
         self.write_graph(graph, base=this_url)
 
     def post_topic_by_name(self, path_info, topic_name):
@@ -239,13 +263,13 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         topic_type = proxy.get_topic_type(topic_name, topics_glob)
         if not topic_type:
-            raise tornado.web.HTTPError(404, reason="No such topic: %s" % (topic_name,))
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
         content_type = self.request.headers.get("Content-Type", "")
         rdf_format = rdfutils.get_parseable_rdf_format(content_type)
         self.set_header("Accept-Post", self.accepted_rdf_mimetypes)
         if not rdf_format:
-            raise tornado.web.HTTPError(415)
+            raise tornado.web.HTTPError(HTTP_UNSUPPORTED_MEDIA_TYPE)
         try:
             rdf_graph = hybrit_graph().parse(data=self.request.body, format=rdf_format)
             messages = rdfutils.extract_ros_messages(rdf_graph, add_ros_type_to_object=True)
@@ -253,7 +277,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         except Exception as e:
             msg = "Exception in deserialization of %s RDF content type" % rdf_format
             logging.exception(msg)
-            raise tornado.web.HTTPError(400, reason=msg)
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
         latch = False
         queue_size = 100
 
@@ -273,8 +297,10 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         topic_name = slash_at_start(topic_name)
 
         def subscr_filter(subscr):
-            target_path = getattr(subscr, 'target_path')
-            return target_path and target_path in ('/transforms', '/transforms/')
+            try:
+                return subscr.context.get("topic", None) == topic_name
+            except ValueError:
+                return False
 
         this_url = self.full_request_url()
 
@@ -287,12 +313,23 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         for subscr in subscriptions.filter_subscriptions(filter_func=subscr_filter):
             graph.add((this_resource, subscriptions.HYBRIT.subscription, subscr.rdf_node()))
+            subscr.to_rdf(graph=graph)
 
         self.write_graph(graph, base=this_url)
 
     def topic_subscription_by_id(self, path_info, topic_name, id):
         print('GET topic_subscription_by_id(%r,%r)' % (topic_name, id), file=sys.stderr)
-        raise tornado.web.HTTPError(404)
+
+        this_url = self.full_request_url()
+
+        graph = subscriptions.hybrit_graph()
+
+        subscr = subscriptions.get_subscription_by_id(id)
+        if not subscr:
+            raise tornado.web.HTTPError(404)
+
+        graph = subscr.to_rdf(graph=graph)
+        self.write_graph(graph, base=this_url)
 
     # Utilities
 
