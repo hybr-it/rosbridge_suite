@@ -1,8 +1,9 @@
 from __future__ import print_function
 import logging
-import rospy
-import six
 import sys
+import six
+import json
+import rospy
 import tornado
 import tornado.web
 import tornado.wsgi
@@ -17,10 +18,14 @@ from rosapi.glob_helper import get_globs, topics_glob, services_glob, params_glo
 from rosapi import proxy, objectutils, params
 import lrt_debug as debug
 import lrt_debug_switch as debug_switch
-import lrt_subscriptions as subscriptions
+import lrt_subscriptions
 from lrt_rdf import hybrit_graph, LDP, ROS, HYBRIT
 from werkzeug.routing import Map, Rule, HTTPException, NotFound, RequestRedirect
-from rosbridge_library.internal.publishers import manager
+from functools import partial
+from rosbridge_library.internal.publishers import manager as publisher_manager
+from rosbridge_library.internal.subscribers import manager as subscriber_manager
+from rosbridge_library.capabilities.subscribe import Subscription
+from collections import defaultdict
 
 UUID_URI = 'http://{}'.format(uuid.uuid4())
 
@@ -33,6 +38,7 @@ HTTP_NOT_FOUND = 404
 HTTP_UNSUPPORTED_MEDIA_TYPE = 415
 HTTP_INTERNAL_SERVER_ERROR = 500
 HTTP_NOT_IMPLEMENTED = 501
+
 
 def create_graph(base_name=UUID_URI):
     text = """
@@ -94,43 +100,35 @@ def slash_at_end(s):
     return s if s.endswith('/') else s + '/'
 
 
-class LinkedRoboticThing(tornado.web.RequestHandler):
-    client_id_seed = 0
+def ros_message_to_rdf(msg, rdf_content_type=None):
+    rdfutils.add_jsonld_context_to_ros_message(msg)
 
-    def initialize(self, client_id=None, path_prefix=None):
-        cls = self.__class__
-        if client_id is None:
-            self.client_id = int(cls.client_id_seed.incr() - 1)
-        else:
-            self.client_id = client_id
-        self.path_prefix = path_prefix
-        self.url_map = Map([
-            Rule('/', endpoint='index'),
-            Rule('/topics/', endpoint='all_topics'),
-            Rule('/topics/<path:topic_name>/', endpoint='get_topic_by_name', methods=["GET"]),
-            Rule('/topics/<path:topic_name>/', endpoint='post_topic_by_name', methods=["POST"]),
-            Rule('/topics/<path:topic_name>/subscriptions/', endpoint='all_topic_subscriptions'),
-            Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='topic_subscription_by_id')
-        ])
+    result = None
+    if rdf_content_type and rdf_content_type != "application/ld+json":
+        rdf_graph = rdflib.Graph().parse(data=json.dumps(msg), format='json-ld')
+        result, content_type = rdfutils.serialize_rdf_graph(rdf_graph, rdf_content_type)
+    else:
+        result = json.dumps(msg)
 
-        self.views = {
-            'index': self.index,
-            'get_topic_by_name': self.get_topic_by_name,
-            'post_topic_by_name': self.post_topic_by_name,
-            'all_topics': self.all_topics,
-            'all_topic_subscriptions': self.all_topic_subscriptions,
-            'topic_subscription_by_id': self.topic_subscription_by_id
-        }
-        self.accepted_rdf_mimetypes = ", ".join(rdfutils.get_parseable_rdf_mimetypes())
+    return result
+
+
+class LRTState(object):
+    """LinkedRoboticThing state kept between requests"""
+
+    def __init__(self):
+        self.client_id = None
 
         self._on_destroy_called = False
 
         # Save the topics that are published on for the purposes of unregistering
         self._published = {}
 
-        if not debug_switch.DEBUG_NO_FRAME_UPDATES:  # DEBUG 4 NO FRAME UPDATES
-            pass
-        subscriptions.start_loop()
+        # Maps topic names to subscriptions
+        self._subscriptions = {}
+
+        # Maps topic names to webhooks
+        self._webhooks = defaultdict(list)
 
     def __del__(self):
         self.destroy()
@@ -142,8 +140,122 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def on_destroy(self):
         for topic in self._published:
-            manager.unregister(self.client_id, topic)
+            publisher_manager.unregister(self.client_id, topic)
         self._published.clear()
+        for subscription in self._subscriptions.values():
+            subscription.unregister()
+        self._subscriptions.clear()
+
+    def subscribe(self, topic, sid=None, msg_type=None, throttle_rate=0,
+                  queue_length=0, fragment_size=None, compression="none", options=None):
+        if topic not in self._subscriptions:
+            cb = partial(self.notify_topic_subscribers, topic)
+            self._subscriptions[topic] = Subscription(self.client_id, topic, cb)
+
+        # Register the subscriber
+        _options = {}
+        if options is not None:
+            _options.update(options)
+        _options["add_ros_type_to_message"] = True
+        self._subscriptions[topic].subscribe(sid=sid, msg_type=msg_type, throttle_rate=throttle_rate,
+                                             queue_length=queue_length, fragment_size=fragment_size,
+                                             compression=compression, options=_options)
+
+        logger.info("Subscribed to %s", topic)
+
+    def unsubscribe(self, topic, sid=None):
+        if topic not in self._subscriptions:
+            return
+        self._subscriptions[topic].unsubscribe(sid)
+
+        if self._subscriptions[topic].is_empty():
+            self._subscriptions[topic].unregister()
+            del self._subscriptions[topic]
+        logger.info("Unsubscribed from %s", topic)
+
+    def notify_topic_subscribers(self, topic, message, fragment_size=None, compression="none"):
+        #print("notify_topic_subscribers(%r, %r)" % (topic, message))  # DEBUG
+        serialized_messages = {}  # Cache serialized messages by content type
+        for webhook in self._webhooks[topic]:
+            content_type = webhook.content_type
+            smsg = serialized_messages.get(content_type, None)
+            if smsg is None:
+                try:
+                    smsg = ros_message_to_rdf(message, rdf_content_type=content_type)
+                except Exception as e:
+                    logger.exception("Exception in serialization of %s RDF content type", content_type)
+                    continue
+                serialized_messages[webhook.content_type] = smsg
+            webhook.notify(smsg)
+
+    def register_webhook(self, topic, target_resource, callback_url, content_type):
+        subscr = lrt_subscriptions.WebhookSubscription(
+            target_resource=target_resource,
+            callback_url=callback_url,
+            callback=None,
+            content_type=content_type,
+            context={"topic": topic})
+        subscr.register()
+        self._webhooks[topic].append(subscr)
+        self.subscribe(topic, sid=subscr.id)
+        return subscr
+
+    def unregister_webhook(self, subscr):
+        topic = subscr.context.get("topic")
+        self.unsubscribe(topic, sid=subscr.id)
+        self._webhooks[topic].remove(subscr)
+        subscr.unregister()
+
+    def publish_ros_messages(self, topic, messages, latch=False, queue_size=100):
+        # Register as a publishing client, propagating any exceptions
+        publisher_manager.register(self.client_id, topic, latch=latch, queue_size=queue_size)
+        self._published[topic] = True
+
+        # Publish the message
+        if isinstance(messages, (tuple, list)):
+            for message in messages:
+                publisher_manager.publish(self.client_id, topic, message, latch=latch, queue_size=queue_size)
+        else:
+            publisher_manager.publish(self.client_id, topic, messages, latch=latch, queue_size=queue_size)
+
+
+class LinkedRoboticThing(tornado.web.RequestHandler):
+    client_id_seed = 0
+    state = LRTState()
+    accepted_rdf_mimetypes = ", ".join(rdfutils.get_parseable_rdf_mimetypes())
+
+    url_map = Map([
+        Rule('/', endpoint='index'),
+        Rule('/topics/', endpoint='all_topics'),
+        Rule('/topics/<path:topic_name>/', endpoint='get_topic_by_name', methods=["GET"]),
+        Rule('/topics/<path:topic_name>/', endpoint='post_topic_by_name', methods=["POST"]),
+        Rule('/topics/<path:topic_name>/subscriptions/', endpoint='all_topic_subscriptions'),
+        Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='get_topic_subscription', methods=["GET"]),
+        Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='delete_topic_subscription', methods=["DELETE"])
+    ])
+
+    def initialize(self, client_id=None, path_prefix=None):
+        cls = self.__class__
+        if cls.state.client_id is None:
+            if client_id is None:
+                cls.state.client_id = int(cls.client_id_seed.incr() - 1)
+            else:
+                cls.state.client_id = client_id
+        self.path_prefix = path_prefix
+
+        self.views = {
+            'index': self.index,
+            'get_topic_by_name': self.get_topic_by_name,
+            'post_topic_by_name': self.post_topic_by_name,
+            'all_topics': self.all_topics,
+            'all_topic_subscriptions': self.all_topic_subscriptions,
+            'get_topic_subscription': self.get_topic_subscription,
+            'delete_topic_subscription': self.delete_topic_subscription
+        }
+
+        if not debug_switch.DEBUG_NO_FRAME_UPDATES:  # DEBUG 4 NO FRAME UPDATES
+            pass
+        #lrt_subscriptions.start_loop()
 
     def prepare(self):
         pass
@@ -188,6 +300,9 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     def post(self, path):
         self.dispatch_request(path_info=path, method="POST")
 
+    def delete(self, path):
+        self.dispatch_request(path_info=path, method="DELETE")
+
     # Logic Handlers
 
     def index(self, path_info=None):
@@ -227,6 +342,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         self.write_graph(graph, base=this_url)
 
     def get_topic_by_name(self, path_info, topic_name):
+        cls = self.__class__
         print('GET topic_by_name(%r)' % (topic_name,), file=sys.stderr)
 
         topic_name = slash_at_start(topic_name)
@@ -238,15 +354,23 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             callback_url = self.request.headers.get('Callback')
             if not callback_url:
                 raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reasone='Missing callback header')
-            subscr = subscriptions.WebhookSubscription(
+
+            topic_type = proxy.get_topic_type(topic_name, topics_glob)
+            if not topic_type:
+                raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
+
+            accept_mimetypes = rdfutils.get_accept_mimetypes(self.request.headers.get("Accept"))
+            rdf_content_type = rdfutils.get_rdf_content_type(accept_mimetypes)
+
+            subscr = cls.state.register_webhook(
+                topic=topic_name,
                 target_resource=this_url,
                 callback_url=callback_url,
-                callback=None,
-                context={"topic": topic_name})
-            subscr.register()
+                content_type=rdf_content_type)
+
             graph = subscr.to_rdf()
             print("new callback " + this_url + " " + callback_url)
-            self.write_graph(graph, base=this_url)
+            self.write_graph(graph, base=this_url, rdf_content_type=rdf_content_type)
             return
 
         graph = hybrit_graph()
@@ -258,6 +382,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         self.write_graph(graph, base=this_url)
 
     def post_topic_by_name(self, path_info, topic_name):
+        cls = self.__class__
         print('POST post_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
         topic_name = slash_at_start(topic_name)
 
@@ -273,21 +398,16 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         try:
             rdf_graph = hybrit_graph().parse(data=self.request.body, format=rdf_format)
             messages = rdfutils.extract_ros_messages(rdf_graph, add_ros_type_to_object=True)
-            debug.log(messages)
         except Exception as e:
             msg = "Exception in deserialization of %s RDF content type" % rdf_format
             logging.exception(msg)
             raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
+
         latch = False
         queue_size = 100
 
-        # Register as a publishing client, propagating any exceptions
-        manager.register(self.client_id, topic_name, latch=latch, queue_size=queue_size)
-        self._published[topic_name] = True
-
-        # Publish the message
-        for type, message in messages:
-            manager.publish(self.client_id, topic_name, message, latch=latch, queue_size=queue_size)
+        cls.state.publish_ros_messages(topic_name, [message for _, message in messages], latch=latch,
+                                       queue_size=queue_size)
 
     # Subscriptions
 
@@ -306,37 +426,49 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         this_resource = rdflib.URIRef(this_url)
 
-        graph = subscriptions.hybrit_graph()
+        graph = lrt_subscriptions.hybrit_graph()
         graph.add((this_resource, rdflib.RDF.type, LDP.BasicContainer))
         graph.add((this_resource, rdflib.RDF.type, LDP.Container))
         graph.add((this_resource, DCTERMS.title, rdflib.Literal("a list of subscriptions to topic %s" % (topic_name,))))
 
-        for subscr in subscriptions.filter_subscriptions(filter_func=subscr_filter):
-            graph.add((this_resource, subscriptions.HYBRIT.subscription, subscr.rdf_node()))
+        for subscr in lrt_subscriptions.filter_subscriptions(filter_func=subscr_filter):
+            graph.add((this_resource, lrt_subscriptions.HYBRIT.subscription, subscr.rdf_node()))
             subscr.to_rdf(graph=graph)
 
         self.write_graph(graph, base=this_url)
 
-    def topic_subscription_by_id(self, path_info, topic_name, id):
-        print('GET topic_subscription_by_id(%r,%r)' % (topic_name, id), file=sys.stderr)
+    def get_topic_subscription(self, path_info, topic_name, id):
+        print('GET get_topic_subscription(%r,%r)' % (topic_name, id), file=sys.stderr)
 
         this_url = self.full_request_url()
 
-        graph = subscriptions.hybrit_graph()
+        graph = lrt_subscriptions.hybrit_graph()
 
-        subscr = subscriptions.get_subscription_by_id(id)
+        subscr = lrt_subscriptions.get_subscription_by_id(id)
         if not subscr:
-            raise tornado.web.HTTPError(404)
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND)
 
         graph = subscr.to_rdf(graph=graph)
         self.write_graph(graph, base=this_url)
 
+    def delete_topic_subscription(self, path_info, topic_name, id):
+        cls = self.__class__
+        print('DELETE delete_topic_subscription(%r,%r)' % (topic_name, id), file=sys.stderr)
+
+        subscr = lrt_subscriptions.get_subscription_by_id(id)
+        if not subscr:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND)
+
+        cls.state.unregister_webhook(subscr)
+
     # Utilities
 
-    def write_graph(self, graph, base=None):
-        http_accept = self.request.headers.get("Accept")
-        accept_mimetypes = rdfutils.get_accept_mimetypes(http_accept)
-        rdf_content_type = rdfutils.get_rdf_content_type(accept_mimetypes)
+    def write_graph(self, graph, base=None, rdf_content_type=None):
+        if not rdf_content_type:
+            http_accept = self.request.headers.get("Accept")
+            accept_mimetypes = rdfutils.get_accept_mimetypes(http_accept)
+            rdf_content_type = rdfutils.get_rdf_content_type(accept_mimetypes)
+
         content, content_type = rdfutils.serialize_rdf_graph(graph, content_type=rdf_content_type, base=base)
         self.set_header("Content-Type", content_type)
         self.write(content)
@@ -349,7 +481,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
             reachable = rdfutils.get_reachable_statements(rdflib.URIRef(rdf_uri), LRT_GRAPH)
             if not reachable:
-                raise tornado.web.HTTPError(404)
+                raise tornado.web.HTTPError(HTTP_NOT_FOUND)
         else:
             reachable = LRT_GRAPH
 

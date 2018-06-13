@@ -303,3 +303,18 @@ class WebhookSubscription(Subscription):
             target_resource = self.target_resource
         subscr_uri = urllib.parse.urljoin(target_resource, 'subscriptions/{}'.format(self.id))
         return URIRef(subscr_uri)
+
+    def notify(self, data, session=None):
+        if not self.callback_url:
+            return
+        try:
+            if not debug_switch.DEBUG_NO_NOTIFICATION_REQUESTS:
+                if not session:
+                    post = requests.post
+                else:
+                    post = session.post
+                response = post(self.callback_url, data=data,
+                                headers={'Content-Type': self.content_type})
+                #print("notify: response: {0}".format(response)) DEBUG
+        except requests.exceptions.RequestException as ex:
+            print("notify: Exception {0}: {1}".format(ex.__class__.__name__, ex), file=sys.stderr)
