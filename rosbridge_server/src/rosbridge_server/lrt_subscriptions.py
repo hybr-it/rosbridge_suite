@@ -3,7 +3,7 @@ from __future__ import print_function
 import sys
 import uuid
 import logging
-#import profilehooks
+# import profilehooks
 import threading
 import time
 import six
@@ -16,7 +16,6 @@ import lrt_debug as debug
 from lrt_rdf import hybrit_graph, SUBSCRIPTION, ROS, HYBRIT
 import concurrent.futures
 import atexit
-
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +102,7 @@ class Handler(object):
                         debug.log("TOO MANY FUTURES", self._num_futures, "NUM_SUBSCR", n)
                         time.sleep(0)
                         continue
-                    #else:
+                    # else:
                     #    debug.log("NUM_FUTURES", self._num_futures)
 
                 with self._thread_lock:
@@ -315,6 +314,53 @@ class WebhookSubscription(Subscription):
                     post = session.post
                 response = post(self.callback_url, data=data,
                                 headers={'Content-Type': self.content_type})
-                #print("notify: response: {0}".format(response)) DEBUG
+                # print("notify: response: {0}".format(response)) DEBUG
         except requests.exceptions.RequestException as ex:
             print("notify: Exception {0}: {1}".format(ex.__class__.__name__, ex), file=sys.stderr)
+
+
+class WebsocketSubscription(Subscription):
+    def __init__(self, target_resource, websocket_url, content_type="text/turtle", callback=None,
+                 notification_callback=None, context=None):
+        super(WebsocketSubscription, self).__init__(callback=callback, context=context)
+        self.target_resource = target_resource
+        self.target_parsed_url = urllib.parse.urlsplit(target_resource)
+        self.websocket_url = websocket_url
+        self.content_type = content_type
+        self.notification_callback = notification_callback
+
+    @property
+    def target_path(self):
+        return self.target_parsed_url.path
+
+    def to_rdf(self, base_uri=None, graph=None):
+        graph = hybrit_graph(graph)
+
+        if base_uri:
+            target_resource = urllib.parse.urljoin(base_uri, url=self.target_parsed_url[2])
+        else:
+            target_resource = self.target_resource
+
+        subscr_node = self.rdf_node()
+        graph.add((subscr_node, RDF.type, HYBRIT.Subscription))
+        graph.add((subscr_node, RDF.type, HYBRIT.WebsocketCallback))
+        graph.add((subscr_node, SUBSCRIPTION.type, Literal("websocket")))
+        graph.add((subscr_node, HYBRIT.onResource, URIRef(target_resource)))
+        graph.add((subscr_node, SUBSCRIPTION.targetResource, URIRef(target_resource)))
+        graph.add((subscr_node, HYBRIT.mediaType, Literal(self.content_type)))
+        graph.add((subscr_node, HYBRIT.websocketUrl, Literal(self.websocket_url, datatype=XSD.anyURI)))
+        graph.add((subscr_node, DCTERMS.identifier, Literal(str(self.id))))
+
+        return graph
+
+    def rdf_node(self, base_uri=None):
+        if base_uri:
+            target_resource = urllib.parse.urljoin(base_uri, url=self.target_parsed_url[2])
+        else:
+            target_resource = self.target_resource
+        subscr_uri = urllib.parse.urljoin(target_resource, 'subscriptions/{}'.format(self.id))
+        return URIRef(subscr_uri)
+
+    def notify(self, data, *args, **kwargs):
+        if self.notification_callback:
+            self.notification_callback(data, *args, **kwargs)

@@ -43,7 +43,7 @@ from tornado.web import Application
 
 from rosbridge_server import RosbridgeWebSocket
 from rosbridge_server import RosbridgeWebSocketRDF
-from rosbridge_server import LinkedRoboticThing
+from rosbridge_server import LinkedRoboticThing, LRTWebSocket
 
 from rosbridge_library.capabilities.advertise import Advertise
 from rosbridge_library.capabilities.publish import Publish
@@ -249,10 +249,12 @@ if __name__ == "__main__":
     RosbridgeWebSocket.client_id_seed = client_id_seed
     RosbridgeWebSocketRDF.client_id_seed = client_id_seed
     LinkedRoboticThing.client_id_seed = client_id_seed
+    LRTWebSocket.client_id_seed = client_id_seed
 
     application = Application([(r"/", RosbridgeWebSocket), (r"", RosbridgeWebSocket),
                                (r"/rdf/", RosbridgeWebSocketRDF), (r"/rdf", RosbridgeWebSocketRDF),
-                               (r"/lrt(?P<path>/.*)?", LinkedRoboticThing, dict(path_prefix="/lrt"))
+                               (r"/lrt(?P<path>/.*)?", LinkedRoboticThing, dict(path_prefix="/lrt", websocket_prefix="/lrtws")),
+                               (r"/lrtws(?P<topic>/.*)?", LRTWebSocket, dict(path_prefix="/lrtws", resource_prefix="/lrt"))
                                ])
 
     connected = False

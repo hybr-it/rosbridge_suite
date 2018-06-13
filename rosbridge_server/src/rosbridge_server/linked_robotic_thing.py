@@ -6,14 +6,13 @@ import json
 import rospy
 import tornado
 import tornado.web
-import tornado.wsgi
+from tornado.ioloop import IOLoop
+from tornado.websocket import WebSocketHandler
 import uuid
 import rdflib
 import rdflib.namespace
-from rdflib.namespace import DCTERMS
+from rdflib.namespace import DCTERMS, XSD
 from rosbridge_library.util import rdfutils
-import re
-import posixpath
 from rosapi.glob_helper import get_globs, topics_glob, services_glob, params_glob
 from rosapi import proxy, objectutils, params
 import lrt_debug as debug
@@ -116,8 +115,8 @@ def ros_message_to_rdf(msg, rdf_content_type=None):
 class LRTState(object):
     """LinkedRoboticThing state kept between requests"""
 
-    def __init__(self):
-        self.client_id = None
+    def __init__(self, client_id=None):
+        self.client_id = client_id
 
         self._on_destroy_called = False
 
@@ -142,9 +141,13 @@ class LRTState(object):
         for topic in self._published:
             publisher_manager.unregister(self.client_id, topic)
         self._published.clear()
-        for subscription in self._subscriptions.values():
+        for subscription in six.itervalues(self._subscriptions):
             subscription.unregister()
         self._subscriptions.clear()
+        for topic_webhooks in six.itervalues(self._webhooks):
+            for webhook in topic_webhooks:
+                webhook.unregister()
+        self._webhooks.clear()
 
     def subscribe(self, topic, sid=None, msg_type=None, throttle_rate=0,
                   queue_length=0, fragment_size=None, compression="none", options=None):
@@ -174,7 +177,7 @@ class LRTState(object):
         logger.info("Unsubscribed from %s", topic)
 
     def notify_topic_subscribers(self, topic, message, fragment_size=None, compression="none"):
-        #print("notify_topic_subscribers(%r, %r)" % (topic, message))  # DEBUG
+        # print("notify_topic_subscribers(%r, %r)" % (topic, message))  # DEBUG
         serialized_messages = {}  # Cache serialized messages by content type
         for webhook in self._webhooks[topic]:
             content_type = webhook.content_type
@@ -200,6 +203,19 @@ class LRTState(object):
         self.subscribe(topic, sid=subscr.id)
         return subscr
 
+    def register_websocket(self, topic, target_resource, websocket_url, content_type, notification_callback):
+        subscr = lrt_subscriptions.WebsocketSubscription(
+            target_resource=target_resource,
+            websocket_url=websocket_url,
+            callback=None,
+            content_type=content_type,
+            notification_callback=notification_callback,
+            context={"topic": topic})
+        subscr.register()
+        self._webhooks[topic].append(subscr)
+        self.subscribe(topic, sid=subscr.id)
+        return subscr
+
     def unregister_webhook(self, subscr):
         topic = subscr.context.get("topic")
         self.unsubscribe(topic, sid=subscr.id)
@@ -219,6 +235,78 @@ class LRTState(object):
             publisher_manager.publish(self.client_id, topic, messages, latch=latch, queue_size=queue_size)
 
 
+class LRTWebSocket(WebSocketHandler):
+    client_id_seed = None
+    clients_connected = 0
+
+    def initialize(self, path_prefix=None, resource_prefix=None):
+        self.path_prefix = path_prefix
+        self.resource_prefix = resource_prefix
+
+    def prepare(self):
+        # This is called before open and checks if topic is valid
+        topic = self.path_kwargs.get("topic")
+
+        topics = rosapi.proxy.get_topics(topics_glob)
+        if topic not in topics:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic,))
+
+        topic_type = rosapi.proxy.get_topic_type(topic, topics_glob)
+        if not topic_type:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic,))
+
+        http_accept = self.request.headers.get("Accept")
+        accept_mimetypes = rdfutils.get_accept_mimetypes(http_accept)
+        self.rdf_content_type = rdfutils.get_rdf_content_type(accept_mimetypes)
+
+    def full_request_url(self):
+        # returns same as self.request.full_url()
+        # FIXME add support for additional X-* headers
+        return self.request.protocol + "://" + self.request.host + self.request.path
+
+    def full_root_url(self):
+        return self.request.protocol + "://" + self.request.host + self.path_prefix
+
+    def full_resource_url(self, path):
+        return join_paths(self.request.protocol + "://" + self.request.host + self.resource_prefix, path)
+
+    def open(self, topic):
+        cls = self.__class__
+
+        self.topic = topic
+
+        this_url = self.full_request_url()
+
+        try:
+            self.state = LRTState(client_id=int(cls.client_id_seed.incr() - 1))
+            self.set_nodelay(True)
+            cls.clients_connected += 1
+            self.state.register_websocket(self.topic,
+                                          self.full_resource_url(slash_at_end("/topics" + self.topic)),
+                                          this_url,
+                                          self.rdf_content_type,
+                                          notification_callback=self.send_message)
+        except Exception as exc:
+            rospy.logerr("Unable to accept incoming connection.  Reason: %s", str(exc))
+        rospy.loginfo("RDF Client %d connected to topic %s.  %d clients total.", self.state.client_id, topic,
+                      cls.clients_connected)
+
+    def on_message(self, message):
+        cls = self.__class__
+
+    def on_close(self):
+        cls = self.__class__
+        cls.clients_connected -= 1
+        self.state.destroy()
+        rospy.loginfo("RDF Client disconnected. %d clients total.", cls.clients_connected)
+
+    def send_message(self, message, binary=False):
+        IOLoop.instance().add_callback(partial(self.write_message, message, binary=binary))
+
+    def check_origin(self, origin):
+        return True
+
+
 class LinkedRoboticThing(tornado.web.RequestHandler):
     client_id_seed = 0
     state = LRTState()
@@ -231,10 +319,11 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         Rule('/topics/<path:topic_name>/', endpoint='post_topic_by_name', methods=["POST"]),
         Rule('/topics/<path:topic_name>/subscriptions/', endpoint='all_topic_subscriptions'),
         Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='get_topic_subscription', methods=["GET"]),
-        Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='delete_topic_subscription', methods=["DELETE"])
+        Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='delete_topic_subscription',
+             methods=["DELETE"])
     ])
 
-    def initialize(self, client_id=None, path_prefix=None):
+    def initialize(self, client_id=None, path_prefix=None, websocket_prefix=None):
         cls = self.__class__
         if cls.state.client_id is None:
             if client_id is None:
@@ -242,6 +331,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             else:
                 cls.state.client_id = client_id
         self.path_prefix = path_prefix
+        self.websocket_prefix = websocket_prefix
 
         self.views = {
             'index': self.index,
@@ -255,7 +345,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         if not debug_switch.DEBUG_NO_FRAME_UPDATES:  # DEBUG 4 NO FRAME UPDATES
             pass
-        #lrt_subscriptions.start_loop()
+        # lrt_subscriptions.start_loop()
 
     def prepare(self):
         pass
@@ -270,6 +360,9 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def full_root_url(self):
         return self.request.protocol + "://" + self.request.host + self.path_prefix
+
+    def full_websocket_url(self):
+        return self.request.protocol + "://" + self.request.host + self.websocket_prefix
 
     def dispatch_request(self, path_info, method=None):
         if not path_info:
@@ -320,6 +413,9 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         graph.add((topic_node, rdflib.RDF.type, ROS.Topic))
         graph.add((topic_node, ROS.type, rdflib.Literal(topic_type)))
         graph.add((topic_node, HYBRIT.subscriptions, subscriptions_node))
+        graph.add((topic_node, HYBRIT.websocketUrl,
+                   rdflib.Literal(join_paths(self.full_websocket_url(), topic_name), datatype=XSD.anyURI)))
+
         return topic_node
 
     def all_topics(self, path_info=None):
