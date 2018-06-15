@@ -12,6 +12,7 @@ import uuid
 import rdflib
 import rdflib.namespace
 from rdflib.namespace import DCTERMS, XSD
+import rosapi
 from rosbridge_library.util import rdfutils
 from rosapi.glob_helper import get_globs, topics_glob, services_glob, params_glob
 from rosapi import proxy, objectutils, params
@@ -59,6 +60,10 @@ def create_graph(base_name=UUID_URI):
     hybrit:topics <topics> .
 
 <topics>
+    rdf:type ldp:BasicContainer ;
+    rdf:type ldp:Container .
+
+<params>
     rdf:type ldp:BasicContainer ;
     rdf:type ldp:Container .
     """.format(root=rdfutils.add_slash(UUID_URI))
@@ -342,6 +347,11 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     url_map = Map([
         Rule('/', endpoint='index'),
+        Rule('/params/', endpoint='get_all_params', methods=["GET"]),
+        Rule('/params/', endpoint='create_param', methods=["POST"]),
+        Rule('/params/<path:param_name>/', endpoint='get_param_by_name', methods=["GET"]),
+        Rule('/params/<path:param_name>/', endpoint='post_param_by_name', methods=["POST"]),
+        Rule('/params/<path:param_name>/', endpoint='delete_param_by_name', methods=["DELETE"]),
         Rule('/topics/', endpoint='get_all_topics', methods=["GET"]),
         Rule('/topics/', endpoint='advertise_topic', methods=["POST"]),
         Rule('/topics/<path:topic_name>/', endpoint='get_topic_by_name', methods=["GET"]),
@@ -365,6 +375,11 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         self.views = {
             'index': self.index,
+            'get_all_params': self.get_all_params,
+            'create_param': self.create_param,
+            'get_param_by_name': self.get_param_by_name,
+            'post_param_by_name': self.post_param_by_name,
+            'delete_param_by_name': self.delete_param_by_name,
             'get_topic_by_name': self.get_topic_by_name,
             'post_topic_by_name': self.post_topic_by_name,
             'delete_topic_by_name': self.delete_topic_by_name,
@@ -433,6 +448,139 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     def index(self, path_info=None):
         print('GET index', file=sys.stderr)
         self.get_graph()
+
+    # Params
+
+    def add_param_node_to_graph(self, graph, param_path, param_name):
+        value = rosapi.params.get_param(param_name, "", params_glob)
+        if value == 'null':
+            return None
+
+        param_node = rdflib.URIRef(param_path)
+        graph.add((param_node, rdflib.RDF.type, ROS.Param))
+        graph.add((param_node, rdflib.RDF.value, rdflib.Literal(value)))
+
+        return param_node
+
+    def get_all_params(self, path_info=None):
+        graph = hybrit_graph()
+
+        this_url = self.full_request_url()
+
+        this_resource = rdflib.URIRef(this_url)
+
+        graph.add((this_resource, rdflib.RDF.type, LDP.BasicContainer))
+        graph.add((this_resource, rdflib.RDF.type, LDP.Container))
+        graph.add((this_resource, DCTERMS.title, rdflib.Literal("a list of all ROS params")))
+
+        param_names = rosapi.params.get_param_names(params_glob)
+
+        for param_name in param_names:
+            param_node = self.add_param_node_to_graph(graph, join_paths(this_resource, param_name), param_name)
+            graph.add((this_resource, LDP.contains, param_node))
+
+        self.write_graph(graph, base=this_url)
+
+    def create_param(self, path_info=None):
+        param_name = self.request.headers.get("Slug", None)
+        if not param_name:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Param name in Slug header is required")
+
+        param_name = slash_at_start(param_name)
+
+        this_url = self.full_request_url()
+        param_url = join_paths(this_url, param_name)
+
+        content_type = self.request.headers.get("Content-Type", "")
+        rdf_format = rdfutils.get_parseable_rdf_format(content_type)
+        if not rdf_format:
+            raise tornado.web.HTTPError(HTTP_UNSUPPORTED_MEDIA_TYPE)
+        try:
+            rdf_graph = hybrit_graph().parse(data=self.request.body, publicID=param_url, format=rdf_format)
+        except Exception as e:
+            msg = "Exception in deserialization of %s RDF content type" % rdf_format
+            logging.exception(msg)
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
+
+        param_node = rdflib.URIRef(param_url)
+
+        if not rdfutils.is_ros_param(rdf_graph, param_node):
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Request does not contain a ROS param")
+
+        param_value = rdfutils.extract_ros_param_value(rdf_graph, param_node)
+
+        try:
+            rosapi.params.set_param(param_name, param_value, params_glob)
+        except Exception as e:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Could not set parameter %s: %s" % (param_name, e))
+
+        self.set_header("Location", param_url)
+        self.set_header("Link", '<http://www.w3.org/ns/ldp#Resource>; rel="type"')
+        self.set_status(201)
+        self.finish()
+
+    def get_param_by_name(self, path_info, param_name):
+        cls = self.__class__
+
+        param_name = slash_at_start(param_name)
+
+        this_url = self.full_request_url()
+
+        graph = hybrit_graph()
+
+        this_resource = rdflib.URIRef(this_url)
+
+        if not self.add_param_node_to_graph(graph, this_resource, param_name):
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such param: %s" % (param_name,))
+        self.write_graph(graph, base=this_url)
+
+    def post_param_by_name(self, path_info, param_name):
+        cls = self.__class__
+        param_name = slash_at_start(param_name)
+
+        if not rosapi.params.has_param(param_name, params_glob):
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such param: %s" % (param_name,))
+
+        this_url = self.full_request_url()
+
+        param_url = join_paths(this_url, param_name)
+
+        content_type = self.request.headers.get("Content-Type", "")
+        rdf_format = rdfutils.get_parseable_rdf_format(content_type)
+        self.set_header("Accept-Post", self.accepted_rdf_mimetypes)
+        if not rdf_format:
+            raise tornado.web.HTTPError(HTTP_UNSUPPORTED_MEDIA_TYPE)
+        try:
+            rdf_graph = hybrit_graph().parse(data=self.request.body, publicID=param_url, format=rdf_format)
+        except Exception as e:
+            msg = "Exception in deserialization of %s RDF content type" % rdf_format
+            logging.exception(msg)
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
+
+        param_node = rdflib.URIRef(param_url)
+
+        if not rdfutils.is_ros_param(rdf_graph, param_node):
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Request does not contain a ROS param")
+
+        param_value = rdfutils.extract_ros_param_value(rdf_graph, param_node)
+
+        try:
+            rosapi.params.set_param(param_name, param_value, params_glob)
+        except Exception as e:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Could not set parameter %s: %s" % (param_name, e))
+
+    def delete_param_by_name(self, path_info, param_name):
+        cls = self.__class__
+        param_name = slash_at_start(param_name)
+
+        if not rosapi.params.has_param(param_name, params_glob):
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such param: %s" % (param_name,))
+
+        rosapi.params.delete_param(param_name, params_glob)
+
+        self.set_header("Link", '<http://www.w3.org/ns/ldp#Resource>; rel="type"')
+        self.set_status(204)
+        self.finish()
 
     # Topics
 

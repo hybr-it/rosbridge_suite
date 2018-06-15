@@ -227,6 +227,19 @@ def extract_rosbridge_messages(graph, **kwargs):
     return [ros_rdf_to_python(graph, m, **kwargs) for m in messages]
 
 
+def is_ros_param(graph, param_node):
+    return (param_node, rdflib.RDF.type, ROS.Param) in graph
+
+
+def extract_ros_param_value(graph, param_node):
+    param_value = '""'
+    for s, p, o in graph.triples((param_node, rdflib.RDF.value, None)):
+        if isinstance(o, rdflib.Literal):
+            param_value = o.toPython()
+            break
+    return param_value
+
+
 def get_reachable_statements(node, graph, seen=None):
     """
     Computes fix point of all blank nodes reachable from passed node
