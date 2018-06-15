@@ -21,9 +21,11 @@ import lrt_subscriptions
 from lrt_rdf import hybrit_graph, LDP, ROS, HYBRIT
 from werkzeug.routing import Map, Rule, HTTPException, NotFound, RequestRedirect
 from functools import partial
+from rosbridge_library.internal import ros_loader
 from rosbridge_library.internal.publishers import manager as publisher_manager
 from rosbridge_library.internal.subscribers import manager as subscriber_manager
 from rosbridge_library.capabilities.subscribe import Subscription
+from rosbridge_library.capabilities.advertise import Registration
 from collections import defaultdict
 
 UUID_URI = 'http://{}'.format(uuid.uuid4())
@@ -126,6 +128,9 @@ class LRTState(object):
         # Maps topic names to subscriptions
         self._subscriptions = {}
 
+        # Advertised topics
+        self._registrations = {}
+
         # Maps topic names to webhooks
         self._webhooks = defaultdict(list)
 
@@ -144,6 +149,9 @@ class LRTState(object):
         for subscription in six.itervalues(self._subscriptions):
             subscription.unregister()
         self._subscriptions.clear()
+        for registration in six.itervalues(self._registrations):
+            registration.unregister()
+        self._registrations.clear()
         for topic_webhooks in six.itervalues(self._webhooks):
             for webhook in topic_webhooks:
                 webhook.unregister()
@@ -175,6 +183,26 @@ class LRTState(object):
             self._subscriptions[topic].unregister()
             del self._subscriptions[topic]
         logger.info("Unsubscribed from %s", topic)
+
+    def advertise(self, topic, msg_type, aid=None, latch=False, queue_size=100):
+        # Create the Registration if one doesn't yet exist
+        if not topic in self._registrations:
+            self._registrations[topic] = Registration(self.client_id, topic)
+
+        # Register, propagating any exceptions
+        self._registrations[topic].register_advertisement(msg_type, aid, latch, queue_size)
+
+    def unadvertise(self, topic, aid=None):
+        # Now unadvertise the topic
+        if topic not in self._registrations:
+            return False
+        self._registrations[topic].unregister_advertisement(aid)
+
+        # Check if the registration is now finished with
+        if self._registrations[topic].is_empty():
+            self._registrations[topic].unregister()
+            del self._registrations[topic]
+        return True
 
     def notify_topic_subscribers(self, topic, message, fragment_size=None, compression="none"):
         # print("notify_topic_subscribers(%r, %r)" % (topic, message))  # DEBUG
@@ -314,9 +342,11 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     url_map = Map([
         Rule('/', endpoint='index'),
-        Rule('/topics/', endpoint='all_topics'),
+        Rule('/topics/', endpoint='get_all_topics', methods=["GET"]),
+        Rule('/topics/', endpoint='advertise_topic', methods=["POST"]),
         Rule('/topics/<path:topic_name>/', endpoint='get_topic_by_name', methods=["GET"]),
         Rule('/topics/<path:topic_name>/', endpoint='post_topic_by_name', methods=["POST"]),
+        Rule('/topics/<path:topic_name>/', endpoint='delete_topic_by_name', methods=["DELETE"]),
         Rule('/topics/<path:topic_name>/subscriptions/', endpoint='all_topic_subscriptions'),
         Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='get_topic_subscription', methods=["GET"]),
         Rule('/topics/<path:topic_name>/subscriptions/<string:id>', endpoint='delete_topic_subscription',
@@ -337,7 +367,9 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             'index': self.index,
             'get_topic_by_name': self.get_topic_by_name,
             'post_topic_by_name': self.post_topic_by_name,
-            'all_topics': self.all_topics,
+            'delete_topic_by_name': self.delete_topic_by_name,
+            'get_all_topics': self.get_all_topics,
+            'advertise_topic': self.advertise_topic,
             'all_topic_subscriptions': self.all_topic_subscriptions,
             'get_topic_subscription': self.get_topic_subscription,
             'delete_topic_subscription': self.delete_topic_subscription
@@ -418,8 +450,8 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         return topic_node
 
-    def all_topics(self, path_info=None):
-        print('GET all_topics')
+    def get_all_topics(self, path_info=None):
+        print('GET get_all_topics')
         graph = hybrit_graph()
 
         this_url = self.full_request_url()
@@ -437,6 +469,48 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         self.write_graph(graph, base=this_url)
 
+    def advertise_topic(self, path_info=None):
+        print('POST advertise_topic')
+
+        topic_name = self.request.headers.get("Slug", None)
+        if not topic_name:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Topic name in Slug header is required")
+
+        topic_name = slash_at_start(topic_name)
+
+        this_url = self.full_request_url()
+        topic_url = join_paths(this_url, topic_name)
+
+        content_type = self.request.headers.get("Content-Type", "")
+        rdf_format = rdfutils.get_parseable_rdf_format(content_type)
+        if not rdf_format:
+            raise tornado.web.HTTPError(HTTP_UNSUPPORTED_MEDIA_TYPE)
+        try:
+            rdf_graph = hybrit_graph().parse(data=self.request.body, publicID=topic_url, format=rdf_format)
+            topic_node = rdflib.URIRef(topic_url)
+        except Exception as e:
+            msg = "Exception in deserialization of %s RDF content type" % rdf_format
+            logging.exception(msg)
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
+
+        if (topic_node, rdflib.RDF.type, ROS.Topic) not in rdf_graph:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Missing topic triple (%s, %s, %s)" % (
+                topic_node, rdflib.RDF.type, ROS.Topic))
+
+        msg_type, topic_data = rdfutils.ros_rdf_to_python(rdf_graph, topic_node)
+        if not msg_type:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Missing ROS message type of topic")
+
+        try:
+            self.state.advertise(topic_name, msg_type)
+        except ros_loader.InvalidTypeStringException as e:
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Invalid ROS type %r: %s" % (msg_type, e))
+
+        self.set_header("Location", topic_url)
+        self.set_header("Link", '<http://www.w3.org/ns/ldp#Resource>; rel="type"')
+        self.set_status(201)
+        self.finish()
+
     def get_topic_by_name(self, path_info, topic_name):
         cls = self.__class__
         print('GET topic_by_name(%r)' % (topic_name,), file=sys.stderr)
@@ -444,6 +518,10 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         topic_name = slash_at_start(topic_name)
 
         this_url = self.full_request_url()
+
+        topics = proxy.get_topics(topics_glob)
+        if topic_name not in topics:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
         # Handle Webhook Subscription
         if self.request.headers.get('Upgrade') in ('webhook', 'callback'):
@@ -482,6 +560,10 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         print('POST post_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
         topic_name = slash_at_start(topic_name)
 
+        topics = proxy.get_topics(topics_glob)
+        if topic_name not in topics:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
+
         topic_type = proxy.get_topic_type(topic_name, topics_glob)
         if not topic_type:
             raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
@@ -504,6 +586,26 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
         cls.state.publish_ros_messages(topic_name, [message for _, message in messages], latch=latch,
                                        queue_size=queue_size)
+
+    def delete_topic_by_name(self, path_info, topic_name):
+        cls = self.__class__
+        print('DELETE delete_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
+        topic_name = slash_at_start(topic_name)
+
+        topics = proxy.get_topics(topics_glob)
+        if topic_name not in topics:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
+
+        topic_type = proxy.get_topic_type(topic_name, topics_glob)
+        if not topic_type:
+            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
+
+        if not cls.state.unadvertise(topic_name):
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Topic %s was not advertised" % (topic_name,))
+
+        self.set_header("Link", '<http://www.w3.org/ns/ldp#Resource>; rel="type"')
+        self.set_status(204)
+        self.finish()
 
     # Subscriptions
 
