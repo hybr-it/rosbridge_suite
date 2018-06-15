@@ -1,3 +1,4 @@
+import decimal
 import rdflib
 import rdflib.namespace
 import rdflib.collection
@@ -192,7 +193,10 @@ def ros_rdf_to_python(graph, node, **kwargs):
     add_ros_type_to_object = bool(kwargs.get("add_ros_type_to_object", False))
 
     if isinstance(node, rdflib.Literal):
-        return None, node.toPython()
+        value = node.toPython()
+        if isinstance(value, decimal.Decimal):
+            value = float(value)
+        return None, value
     elif (node, rdflib.RDF.first, None) in graph and (node, rdflib.RDF.rest, None) in graph:
         cl = rdflib.collection.Collection(graph, node)
         return None, [ros_rdf_to_python(graph, i, **kwargs)[1] for i in cl]
@@ -239,8 +243,10 @@ def extract_ros_param_value(graph, param_node):
             break
     return param_value
 
+
 def is_ros_topic(graph, topic_node):
     return (topic_node, rdflib.RDF.type, ROS.Topic) in graph
+
 
 def get_reachable_statements(node, graph, seen=None):
     """
