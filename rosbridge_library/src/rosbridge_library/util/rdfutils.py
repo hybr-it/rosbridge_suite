@@ -239,6 +239,8 @@ def extract_ros_param_value(graph, param_node):
             break
     return param_value
 
+def is_ros_topic(graph, topic_node):
+    return (topic_node, rdflib.RDF.type, ROS.Topic) in graph
 
 def get_reachable_statements(node, graph, seen=None):
     """

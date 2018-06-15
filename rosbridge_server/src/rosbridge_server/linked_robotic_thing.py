@@ -1,33 +1,35 @@
 from __future__ import print_function
-import logging
-import sys
-import six
+
 import json
-import rospy
+import logging
 import tornado
 import tornado.web
+import uuid
+import six
+from collections import defaultdict
+from functools import partial
 from tornado.ioloop import IOLoop
 from tornado.websocket import WebSocketHandler
-import uuid
+
 import rdflib
 import rdflib.namespace
 from rdflib.namespace import DCTERMS, XSD
-import rosapi
-from rosbridge_library.util import rdfutils
-from rosapi.glob_helper import get_globs, topics_glob, services_glob, params_glob
-from rosapi import proxy, objectutils, params
-import lrt_debug as debug
+
+from werkzeug.routing import Map, Rule, HTTPException, RequestRedirect
+
 import lrt_debug_switch as debug_switch
 import lrt_subscriptions
 from lrt_rdf import hybrit_graph, LDP, ROS, HYBRIT
-from werkzeug.routing import Map, Rule, HTTPException, NotFound, RequestRedirect
-from functools import partial
+import rospy
+import rosapi
+import rosapi.params
+import rosapi.proxy
+from rosapi.glob_helper import topics_glob, params_glob
+from rosbridge_library.capabilities.advertise import Registration
+from rosbridge_library.capabilities.subscribe import Subscription
 from rosbridge_library.internal import ros_loader
 from rosbridge_library.internal.publishers import manager as publisher_manager
-from rosbridge_library.internal.subscribers import manager as subscriber_manager
-from rosbridge_library.capabilities.subscribe import Subscription
-from rosbridge_library.capabilities.advertise import Registration
-from collections import defaultdict
+from rosbridge_library.util import rdfutils
 
 UUID_URI = 'http://{}'.format(uuid.uuid4())
 
@@ -210,7 +212,6 @@ class LRTState(object):
         return True
 
     def notify_topic_subscribers(self, topic, message, fragment_size=None, compression="none"):
-        # print("notify_topic_subscribers(%r, %r)" % (topic, message))  # DEBUG
         serialized_messages = {}  # Cache serialized messages by content type
         for webhook in self._webhooks[topic]:
             content_type = webhook.content_type
@@ -353,7 +354,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         Rule('/params/<path:param_name>/', endpoint='post_param_by_name', methods=["POST"]),
         Rule('/params/<path:param_name>/', endpoint='delete_param_by_name', methods=["DELETE"]),
         Rule('/topics/', endpoint='get_all_topics', methods=["GET"]),
-        Rule('/topics/', endpoint='advertise_topic', methods=["POST"]),
+        Rule('/topics/', endpoint='post_advertise_topic', methods=["POST"]),
         Rule('/topics/<path:topic_name>/', endpoint='get_topic_by_name', methods=["GET"]),
         Rule('/topics/<path:topic_name>/', endpoint='post_topic_by_name', methods=["POST"]),
         Rule('/topics/<path:topic_name>/', endpoint='delete_topic_by_name', methods=["DELETE"]),
@@ -384,7 +385,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             'post_topic_by_name': self.post_topic_by_name,
             'delete_topic_by_name': self.delete_topic_by_name,
             'get_all_topics': self.get_all_topics,
-            'advertise_topic': self.advertise_topic,
+            'post_advertise_topic': self.post_advertise_topic,
             'all_topic_subscriptions': self.all_topic_subscriptions,
             'get_topic_subscription': self.get_topic_subscription,
             'delete_topic_subscription': self.delete_topic_subscription
@@ -446,7 +447,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     # Logic Handlers
 
     def index(self, path_info=None):
-        print('GET index', file=sys.stderr)
         self.get_graph()
 
     # Params
@@ -585,7 +585,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     # Topics
 
     def add_topic_node_to_graph(self, graph, topic_path, topic_name):
-        topic_type = proxy.get_topic_type(topic_name, topics_glob)
+        topic_type = rosapi.proxy.get_topic_type(topic_name, topics_glob)
         if not topic_type:
             return None
         topic_node = rdflib.URIRef(topic_path)
@@ -599,7 +599,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         return topic_node
 
     def get_all_topics(self, path_info=None):
-        print('GET get_all_topics')
         graph = hybrit_graph()
 
         this_url = self.full_request_url()
@@ -610,16 +609,14 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         graph.add((this_resource, rdflib.RDF.type, LDP.Container))
         graph.add((this_resource, DCTERMS.title, rdflib.Literal("a list of all ROS topics")))
 
-        topics = proxy.get_topics(topics_glob)
+        topics = rosapi.proxy.get_topics(topics_glob)
         for topic in topics:
             topic_node = self.add_topic_node_to_graph(graph, join_paths(this_resource, topic), topic)
             graph.add((this_resource, LDP.contains, topic_node))
 
         self.write_graph(graph, base=this_url)
 
-    def advertise_topic(self, path_info=None):
-        print('POST advertise_topic')
-
+    def post_advertise_topic(self, path_info=None):
         topic_name = self.request.headers.get("Slug", None)
         if not topic_name:
             raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Topic name in Slug header is required")
@@ -635,15 +632,14 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(HTTP_UNSUPPORTED_MEDIA_TYPE)
         try:
             rdf_graph = hybrit_graph().parse(data=self.request.body, publicID=topic_url, format=rdf_format)
-            topic_node = rdflib.URIRef(topic_url)
         except Exception as e:
             msg = "Exception in deserialization of %s RDF content type" % rdf_format
             logging.exception(msg)
             raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
 
-        if (topic_node, rdflib.RDF.type, ROS.Topic) not in rdf_graph:
-            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Missing topic triple (%s, %s, %s)" % (
-                topic_node, rdflib.RDF.type, ROS.Topic))
+        topic_node = rdflib.URIRef(topic_url)
+        if not rdfutils.is_ros_topic(rdf_graph, topic_node):
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason="Request does not contain a ROS topic")
 
         msg_type, topic_data = rdfutils.ros_rdf_to_python(rdf_graph, topic_node)
         if not msg_type:
@@ -661,13 +657,12 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def get_topic_by_name(self, path_info, topic_name):
         cls = self.__class__
-        print('GET topic_by_name(%r)' % (topic_name,), file=sys.stderr)
 
         topic_name = slash_at_start(topic_name)
 
         this_url = self.full_request_url()
 
-        topics = proxy.get_topics(topics_glob)
+        topics = rosapi.proxy.get_topics(topics_glob)
         if topic_name not in topics:
             raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
@@ -677,7 +672,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             if not callback_url:
                 raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reasone='Missing callback header')
 
-            topic_type = proxy.get_topic_type(topic_name, topics_glob)
+            topic_type = rosapi.proxy.get_topic_type(topic_name, topics_glob)
             if not topic_type:
                 raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
@@ -691,7 +686,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
                 content_type=rdf_content_type)
 
             graph = subscr.to_rdf()
-            print("new callback " + this_url + " " + callback_url)
             self.write_graph(graph, base=this_url, rdf_content_type=rdf_content_type)
             return
 
@@ -705,14 +699,13 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def post_topic_by_name(self, path_info, topic_name):
         cls = self.__class__
-        print('POST post_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
         topic_name = slash_at_start(topic_name)
 
-        topics = proxy.get_topics(topics_glob)
+        topics = rosapi.proxy.get_topics(topics_glob)
         if topic_name not in topics:
             raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
-        topic_type = proxy.get_topic_type(topic_name, topics_glob)
+        topic_type = rosapi.proxy.get_topic_type(topic_name, topics_glob)
         if not topic_type:
             raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
@@ -737,14 +730,13 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def delete_topic_by_name(self, path_info, topic_name):
         cls = self.__class__
-        print('DELETE delete_topic_by_name(%r)' % (topic_name,), file=sys.stderr)
         topic_name = slash_at_start(topic_name)
 
-        topics = proxy.get_topics(topics_glob)
+        topics = rosapi.proxy.get_topics(topics_glob)
         if topic_name not in topics:
             raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
-        topic_type = proxy.get_topic_type(topic_name, topics_glob)
+        topic_type = rosapi.proxy.get_topic_type(topic_name, topics_glob)
         if not topic_type:
             raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic_name,))
 
@@ -758,8 +750,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     # Subscriptions
 
     def all_topic_subscriptions(self, path_info, topic_name):
-        print('GET all_topic_subscriptions(%r)' % (topic_name,), file=sys.stderr)
-
         topic_name = slash_at_start(topic_name)
 
         def subscr_filter(subscr):
@@ -784,8 +774,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         self.write_graph(graph, base=this_url)
 
     def get_topic_subscription(self, path_info, topic_name, id):
-        print('GET get_topic_subscription(%r,%r)' % (topic_name, id), file=sys.stderr)
-
         this_url = self.full_request_url()
 
         graph = lrt_subscriptions.hybrit_graph()
@@ -799,7 +787,6 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
 
     def delete_topic_subscription(self, path_info, topic_name, id):
         cls = self.__class__
-        print('DELETE delete_topic_subscription(%r,%r)' % (topic_name, id), file=sys.stderr)
 
         subscr = lrt_subscriptions.get_subscription_by_id(id)
         if not subscr:
@@ -849,17 +836,3 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(404)
 
         self.write_graph(graph, base=url_root)
-
-    def get_root_page(self):
-        self.set_header("Content-type", "text/html")
-        html = '''<html>
-            <head><title>Robot RDF Server</title></head>
-            <body>
-            <h1>Robot RDF Server </h1>
-            <div>
-            <a href="robot"> Robot RDF </a>
-            </div>
-            </body>
-            </html>'''
-        self.write(html)
-        self.finish()
