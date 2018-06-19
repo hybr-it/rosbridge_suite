@@ -197,6 +197,8 @@ def ros_rdf_to_python(graph, node, **kwargs):
         if isinstance(value, decimal.Decimal):
             value = float(value)
         return None, value
+    elif node == rdflib.RDF.nil:
+        return None, []
     elif (node, rdflib.RDF.first, None) in graph and (node, rdflib.RDF.rest, None) in graph:
         cl = rdflib.collection.Collection(graph, node)
         return None, [ros_rdf_to_python(graph, i, **kwargs)[1] for i in cl]
