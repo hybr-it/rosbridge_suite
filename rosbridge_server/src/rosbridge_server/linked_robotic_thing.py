@@ -278,16 +278,21 @@ class LRTWebSocket(WebSocketHandler):
         self.resource_prefix = resource_prefix
 
     def prepare(self):
-        # This is called before open and checks if topic is valid
+        # This is called before open and checks if topics are valid
         topic = self.path_kwargs.get("topic")
+        if topic:
+            topics = [topic]
+        else:
+            topics = self.get_query_arguments("topic")
 
-        topics = rosapi.proxy.get_topics(topics_glob)
-        if topic not in topics:
-            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic,))
+        exiting_topics = rosapi.proxy.get_topics(topics_glob)
+        for topic in topics:
+            if topic not in exiting_topics:
+                raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic,))
 
-        topic_type = rosapi.proxy.get_topic_type(topic, topics_glob)
-        if not topic_type:
-            raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic,))
+            topic_type = rosapi.proxy.get_topic_type(topic, topics_glob)
+            if not topic_type:
+                raise tornado.web.HTTPError(HTTP_NOT_FOUND, reason="No such topic: %s" % (topic,))
 
         http_accept = self.request.headers.get("Accept")
         accept_mimetypes = rdfutils.get_accept_mimetypes(http_accept)
@@ -307,7 +312,14 @@ class LRTWebSocket(WebSocketHandler):
     def open(self, topic):
         cls = self.__class__
 
-        self.topic = topic
+        topic = self.path_kwargs.get("topic")
+        if topic:
+            self.topics = [topic]
+        else:
+            self.topics = []
+            for topic in self.get_query_arguments("topic"):
+                if topic and topic not in self.topics:
+                    self.topics.append(topic)
 
         this_url = self.full_request_url()
 
@@ -315,14 +327,17 @@ class LRTWebSocket(WebSocketHandler):
             self.state = LRTState(client_id=int(cls.client_id_seed.incr() - 1))
             self.set_nodelay(True)
             cls.clients_connected += 1
-            self.state.register_websocket(self.topic,
-                                          self.full_resource_url(slash_at_end("/topics" + self.topic)),
-                                          this_url,
-                                          self.rdf_content_type,
-                                          notification_callback=self.send_message)
+            for topic in self.topics:
+                self.state.register_websocket(topic,
+                                              self.full_resource_url(slash_at_end("/topics" + topic)),
+                                              this_url,
+                                              self.rdf_content_type,
+                                              notification_callback=self.send_message)
         except Exception as exc:
             rospy.logerr("Unable to accept incoming connection.  Reason: %s", str(exc))
-        rospy.loginfo("RDF Client %d connected to topic %s.  %d clients total.", self.state.client_id, topic,
+        rospy.loginfo("RDF Client %d connected to topics: %s. %d clients total.",
+                      self.state.client_id,
+                      ", ".join(self.topics),
                       cls.clients_connected)
 
     def on_message(self, message):
