@@ -254,7 +254,7 @@ if __name__ == "__main__":
     application = Application([(r"/", RosbridgeWebSocket), (r"", RosbridgeWebSocket),
                                (r"/rdf/", RosbridgeWebSocketRDF), (r"/rdf", RosbridgeWebSocketRDF),
                                (r"/lrt(?P<path>/.*)?", LinkedRoboticThing, dict(path_prefix="/lrt", websocket_prefix="/lrtws")),
-                               (r"/lrtws(?P<topic>/.*)?", LRTWebSocket, dict(path_prefix="/lrtws", resource_prefix="/lrt"))
+                               (r"/lrtws/topics(?P<topic>/.*)?", LRTWebSocket, dict(path_prefix="/lrtws/topics", resource_prefix="/lrt"))
                                ])
 
     connected = False

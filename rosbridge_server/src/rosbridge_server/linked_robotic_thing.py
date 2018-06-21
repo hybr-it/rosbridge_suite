@@ -412,6 +412,9 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
     def full_websocket_url(self):
         return self.request.protocol + "://" + self.request.host + self.websocket_prefix
 
+    def full_websocket_topics_url(self):
+        return join_paths(self.full_websocket_url(), "/topics")
+
     def dispatch_request(self, path_info, method=None):
         if not path_info:
             # if path is empty or none redirect to root path
@@ -594,7 +597,7 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         graph.add((topic_node, ROS.type, rdflib.Literal(topic_type)))
         graph.add((topic_node, HYBRIT.subscriptions, subscriptions_node))
         graph.add((topic_node, HYBRIT.websocketUrl,
-                   rdflib.Literal(join_paths(self.full_websocket_url(), topic_name), datatype=XSD.anyURI)))
+                   rdflib.Literal(join_paths(self.full_websocket_topics_url(), topic_name), datatype=XSD.anyURI)))
 
         return topic_node
 
