@@ -8,6 +8,7 @@ MATHS = rdflib.Namespace('http://vocab.arvida.de/2015/06/maths/vocab#')
 SPATIAL = rdflib.Namespace('http://vocab.arvida.de/2015/06/spatial/vocab#')
 LDP = rdflib.Namespace('http://www.w3.org/ns/ldp#')
 ROS = rdflib.Namespace("http://ros.org/#")
+ROSF = rdflib.Namespace("http://ros.org/rosfield#")
 
 
 def add_namespaces(graph):
@@ -18,6 +19,7 @@ def add_namespaces(graph):
     namespace_manager.bind('spatial', SPATIAL, override=False)
     namespace_manager.bind('ldp', LDP, override=False)
     namespace_manager.bind('ros', ROS, override=False)
+    namespace_manager.bind('rosf', ROSF, override=False)
     return graph
 
 
@@ -32,5 +34,6 @@ def hybrit_graph(graph=None):
     namespace_manager.bind('spatial', SPATIAL, override=False)
     namespace_manager.bind('ldp', LDP, override=False)
     namespace_manager.bind('ros', ROS, override=False)
+    namespace_manager.bind('rosf', ROSF, override=False)
     namespace_manager.bind('dcterms', DCTERMS, override=False)
     return graph

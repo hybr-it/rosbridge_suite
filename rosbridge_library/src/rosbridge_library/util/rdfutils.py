@@ -115,6 +115,7 @@ def serialize_rdf_graph(rdf_graph, accept_mimetypes=None, content_type=None,
 
 
 ROS = rdflib.Namespace("http://ros.org/#")
+ROSF = rdflib.Namespace("http://ros.org/rosfield#")
 ROSBRIDGE = rdflib.Namespace("http://ros.org/rosbridge#")
 
 ROS_TYPE_FIELD_NAME = "@rostype"
@@ -126,9 +127,9 @@ def create_jsonld_context(value, context_base=None):
         context = context_base.copy() if context_base is not None else {}
         for ikey, ivalue in six.iteritems(value):
             if ikey == ROS_TYPE_FIELD_NAME:
-                id_value = "http://ros.org/#Type"
+                id_value = six.text_type(ROS.type) # type field
             else:
-                id_value = "http://ros.org/#" + ikey
+                id_value = six.text_type(ROSF[ikey]) # field
             key_ctx = {
                 "@id": id_value,
             }
@@ -161,26 +162,28 @@ def _add_jsonld_context_to(value, top_context_base=None):
 def add_jsonld_context_to_ros_message(value):
     context = _add_jsonld_context_to(value, {
         "ros": six.text_type(ROS),
+        "rosf": six.text_type(ROSF),
         "rosbridge": six.text_type(ROSBRIDGE),
         "xsd": six.text_type(rdflib.namespace.XSD)
     })
     if context is not None:
         type = value.get("@type")
         if type is None:
-            value["@type"] = "http://ros.org/#Message"
+            value["@type"] = six.text_type(ROS.Message)
     return context
 
 
 def add_jsonld_context_to_rosbridge_message(value):
     context = _add_jsonld_context_to(value, {
         "ros": six.text_type(ROS),
+        "rosf": six.text_type(ROSF),
         "rosbridge": six.text_type(ROSBRIDGE),
         "xsd": six.text_type(rdflib.XSD)
     })
     if context is not None:
         op = value.get("op")
         if op is not None:
-            value["@type"] = "http://ros.org/rosbridge#Message"
+            value["@type"] = six.text_type(ROSBRIDGE.Message)
         msg = value.get("msg")
         if isinstance(msg, dict):
             add_jsonld_context_to_ros_message(msg)
@@ -206,14 +209,15 @@ def ros_rdf_to_python(graph, node, **kwargs):
         val = {}
         rostype = None
         for s, p, o in graph.triples((node, None, None)):
-            if isinstance(p, rdflib.URIRef) and p.startswith(ROS):
-                prefix, namespace, name = graph.compute_qname(p)
+            if p == ROS.type:
                 member_type, member_value = ros_rdf_to_python(graph, o, **kwargs)
-                if name == "Type":
-                    rostype = member_value
-                    if add_ros_type_to_object:
-                        val[ROS_TYPE_FIELD_NAME] = member_value
-                else:
+                rostype = member_value
+                if add_ros_type_to_object:
+                    val[ROS_TYPE_FIELD_NAME] = member_value
+            elif isinstance(p, rdflib.URIRef):
+                if p.startswith(ROSF):
+                    prefix, namespace, name = graph.compute_qname(p)
+                    member_type, member_value = ros_rdf_to_python(graph, o, **kwargs)
                     val[name] = member_value
         return rostype, val
     return None, None
