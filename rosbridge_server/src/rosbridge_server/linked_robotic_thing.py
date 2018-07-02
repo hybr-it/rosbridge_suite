@@ -743,8 +743,14 @@ class LinkedRoboticThing(tornado.web.RequestHandler):
         latch = False
         queue_size = 100
 
-        cls.state.publish_ros_messages(topic_name, [message for _, message in messages], latch=latch,
-                                       queue_size=queue_size)
+        try:
+            cls.state.publish_ros_messages(topic_name, [message for _, message in messages], latch=latch,
+                                           queue_size=queue_size)
+        except Exception as e:
+            msg = "Exception while publishing ROS messages: %s" % (e,)
+            logging.exception(msg)
+            raise tornado.web.HTTPError(HTTP_BAD_REQUEST, reason=msg)
+
 
     def delete_topic_by_name(self, path_info, topic_name):
         cls = self.__class__
