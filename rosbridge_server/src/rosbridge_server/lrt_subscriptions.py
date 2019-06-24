@@ -16,6 +16,7 @@ import lrt_debug as debug
 from lrt_rdf import hybrit_graph, SUBSCRIPTION, ROS, HYBRIT
 import concurrent.futures
 import atexit
+import socket
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +270,12 @@ class WebhookSubscription(Subscription):
         self.target_resource = target_resource
         self.target_parsed_url = urllib.parse.urlsplit(target_resource)
         self.callback_url = callback_url
+        self.callback_parsed_url = urllib.parse.urlsplit(callback_url)
         self.content_type = content_type
+        if self.callback_parsed_url.scheme == 'udp':
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        else:
+            self.socket = None
 
     @property
     def target_path(self):
@@ -306,17 +312,25 @@ class WebhookSubscription(Subscription):
     def notify(self, data, session=None):
         if not self.callback_url:
             return
-        try:
-            if not debug_switch.DEBUG_NO_NOTIFICATION_REQUESTS:
-                if not session:
-                    post = requests.post
-                else:
-                    post = session.post
-                response = post(self.callback_url, data=data,
-                                headers={'Content-Type': self.content_type})
-                # print("notify: response: {0}".format(response)) DEBUG
-        except requests.exceptions.RequestException as ex:
-            print("notify: Exception {0}: {1}".format(ex.__class__.__name__, ex), file=sys.stderr)
+        if self.callback_parsed_url.scheme == 'udp':
+            try:
+                l = self.socket.sendto(data, (self.callback_parsed_url.hostname, self.callback_parsed_url.port))
+                if l != len(data):
+                    print("notify: udp: sent {} bytes of {} bytes".format(l, len(data)), file=sys.stderr)
+            except Exception as ex:
+                print("notify: udp: Exception {0}: {1}".format(ex.__class__.__name__, ex), file=sys.stderr)
+        else:
+            try:
+                if not debug_switch.DEBUG_NO_NOTIFICATION_REQUESTS:
+                    if not session:
+                        post = requests.post
+                    else:
+                        post = session.post
+                    response = post(self.callback_url, data=data,
+                                    headers={'Content-Type': self.content_type})
+                    # print("notify: response: {0}".format(response)) DEBUG
+            except requests.exceptions.RequestException as ex:
+                print("notify: http: Exception {0}: {1}".format(ex.__class__.__name__, ex), file=sys.stderr)
 
 
 class WebsocketSubscription(Subscription):
