@@ -1,6 +1,10 @@
 rosbridge_suite [![Build Status](https://api.travis-ci.org/RobotWebTools/rosbridge_suite.png)](https://travis-ci.org/RobotWebTools/rosbridge_suite)
 ===============
 
+#### This is modified version for Hybr-IT Project
+
+This rosbridge version was created as a part of [Hybr-IT Project](https://hybr-it-projekt.de/). It supports RDF format for messages and implements [Linked Robotic Thing (LRT) specification](https://www.dfki.de/web/forschung/projekte-publikationen/publikationen/publikation/9196/).
+
 #### Server Implementations of the rosbridge v2 Protocol
 
 rosbridge provides a JSON interface to ROS, allowing any client to send JSON to publish or subscribe to ROS topics, call ROS services, and more. rosbridge supports a variety of transport layers, including WebSockets and TCP. For information on the protocol itself, see the [rosbridge protocol specification](ROSBRIDGE_PROTOCOL.md).
